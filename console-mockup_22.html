@@ -1,0 +1,1765 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Console — mockup de superfície + Audio Trigger Engine</title>
+<style>
+  :root{
+    --bg:#0b0c0e;
+    --surface:#1b1e22;
+    --surface-hi:#24282d;
+    --surface-lo:#131619;
+    --edge:#0a0b0d;
+    --hair:#33383e;
+    --text:#c9d1d9;
+    --text-dim:#6c757e;
+    --oled-bg:#04070a;
+    --oled:#8fe3ff;
+    --oled-dim:#2b6d85;
+    --on:#ff3b30;
+    --prev:#ffb020;
+    --bus:#54d07f;
+    --trig:#ff2d78;
+    --wide:#5b8cff;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:"Helvetica Neue",Inter,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);-webkit-font-smoothing:antialiased}
+  body{padding:10px;overflow-x:auto}
+  .wrap{margin:0 auto}
+
+  .topbar{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+  .topbar h1{font-size:12px;letter-spacing:.2em;text-transform:uppercase;font-weight:600;margin:0}
+  .topbar span{font-size:12px;color:var(--text-dim);letter-spacing:.06em}
+
+  /* ---------- chassis ---------- */
+  .chassis{
+    background:linear-gradient(180deg,#242830 0%,#1a1d21 40%,#15181b 100%);
+    border:1px solid var(--edge);border-radius:10px;
+    box-shadow:0 22px 50px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.06);
+    padding:10px;
+  }
+
+  /* ---------- meter bridge ---------- */
+  .bridge{display:grid;grid-template-columns:1fr 1fr 132px;gap:8px;margin-bottom:8px}
+  .oled{background:var(--oled-bg);border:1px solid #000;border-radius:4px;
+    box-shadow:inset 0 0 22px rgba(30,140,180,.14), 0 1px 0 rgba(255,255,255,.05);}
+  .bridge-meters{padding:8px 11px;display:flex;flex-direction:column;justify-content:center;gap:7px}
+  .bmrow{display:grid;grid-template-columns:52px 1fr 50px;align-items:center;gap:9px}
+  .bmrow b{font-family:var(--mono);font-size:13px;letter-spacing:.12em;color:var(--oled-dim);font-weight:500}
+  .bmrow i{font-family:var(--mono);font-size:13px;color:var(--oled);font-style:normal;text-align:right}
+  .track{height:14px;background:#0a1116;border-radius:1px;position:relative;overflow:hidden}
+  .track .fill{height:100%;width:0%;background:linear-gradient(90deg,#1f8fb0,#8fe3ff 72%,#ffb020 88%,#ff3b30 97%);
+    transition:width .05s linear}
+  .track .seg{position:absolute;inset:0;
+    background:repeating-linear-gradient(90deg,transparent 0 3px,var(--oled-bg) 3px 5px)}
+  .scale{display:grid;grid-template-columns:62px 1fr 56px;gap:10px}
+  .scale div{display:none;font-family:var(--mono);font-size:10px;color:#215466;display:flex;justify-content:space-between}
+  .clockbox{padding:6px 10px;display:flex;flex-direction:column;justify-content:center;gap:3px;align-items:center}
+  .clockbox .t{font-family:var(--mono);font-size:24px;line-height:1;color:var(--oled);letter-spacing:.03em}
+  .clockbox .t2{font-family:var(--mono);font-size:15px;line-height:1;color:var(--oled-dim)}
+  .clockbox .l{display:none}
+
+  /* ---------- surface ---------- */
+  .surface{display:grid;gap:6px}
+  .master{min-width:250px}
+  .layercol{display:flex;flex-direction:column;gap:6px}
+  .layerbtn{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;
+    border:1px solid var(--edge);border-radius:6px;cursor:pointer;user-select:none;
+    background:linear-gradient(180deg,#2c3138,#1c2025);color:#7d868f;
+    font-family:var(--mono);box-shadow:inset 0 1px 0 rgba(255,255,255,.07)}
+  .layerbtn b{font-size:30px;line-height:1;font-weight:600;letter-spacing:.02em}
+  .layerbtn span{font-size:9px;letter-spacing:.12em}
+  .layerbtn:hover{background:linear-gradient(180deg,#353b43,#22262c)}
+  .layerbtn.act{background:linear-gradient(180deg,#2f6f47,#1c4a2d);color:#d8ffe8;border-color:#0d2b1a;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 0 14px rgba(84,208,127,.3)}
+
+  .strip{background:linear-gradient(180deg,var(--surface-hi),var(--surface) 18%,var(--surface-lo));
+    border:1px solid var(--edge);border-radius:6px;padding:7px 6px 9px;display:flex;flex-direction:column;gap:6px}
+
+  .strip-oled{padding:6px 7px;min-height:58px;display:flex;flex-direction:column;gap:4px}
+  .strip-oled .src{font-family:var(--mono);font-size:14px;color:var(--oled);letter-spacing:.02em;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .strip-oled .sub{font-family:var(--mono);font-size:11px;color:var(--oled-dim);display:flex;justify-content:space-between}
+  .strip-oled .cam{font-family:var(--mono);font-size:11px;color:var(--oled-dim);letter-spacing:.06em}
+
+  .knobwrap{display:flex;justify-content:center;padding:2px 0}
+  .knob{width:44px;height:44px;border-radius:50%;position:relative;cursor:ns-resize;touch-action:none;
+    background:radial-gradient(circle at 38% 30%,#494f57,#2a2e33 58%,#171a1d 100%);
+    border:1px solid #0b0c0e;box-shadow:0 3px 6px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.12)}
+  .knob::after{content:"";position:absolute;left:50%;top:5px;width:2px;height:14px;margin-left:-1px;
+    background:var(--oled);border-radius:1px;transform-origin:50% 16px;box-shadow:0 0 6px rgba(143,227,255,.6)}
+  .knoblbl{text-align:center;font-size:10px;letter-spacing:.14em;color:var(--text-dim);text-transform:uppercase}
+
+  .btn{border:1px solid var(--edge);border-radius:3px;background:linear-gradient(180deg,#33383f,#22262a);
+    color:#9aa4ae;font-family:var(--mono);font-size:12px;letter-spacing:.06em;padding:10px 2px;text-align:center;
+    cursor:pointer;user-select:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.07);
+    display:flex;align-items:center;justify-content:center;line-height:1}
+  .btn:hover{background:linear-gradient(180deg,#3b414a,#282d33)}
+  .btn:focus-visible{outline:2px solid var(--oled);outline-offset:1px}
+  .buses{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+  .btn.bus.act{background:linear-gradient(180deg,#2f6f47,#1e4a2f);color:#c6f4d8;border-color:#0d2b1a;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 0 10px rgba(84,208,127,.28)}
+  .btn.prev.act{background:linear-gradient(180deg,#8a5c11,#5c3d0b);color:#ffdf9e;box-shadow:0 0 10px rgba(255,176,32,.3)}
+  .btn.soft{font-size:12px;color:#c9d1d9;letter-spacing:.1em;color:var(--text-dim)}
+
+  .inmeters{display:flex;flex-direction:column;gap:4px;padding:6px 6px;border-radius:3px;
+    background:var(--oled-bg);border:1px solid #000;box-shadow:inset 0 0 14px rgba(30,140,180,.12)}
+  .imrow{display:grid;grid-template-columns:30px 1fr;align-items:center;gap:5px}
+  .imrow b{font-family:var(--mono);font-size:9px;letter-spacing:.06em;color:var(--oled-dim);font-weight:500}
+  .imbar{position:relative;height:9px;background:#0a1116;border-radius:1px;overflow:hidden}
+  .imbar .f{position:absolute;left:0;top:0;bottom:0;width:0%;
+    background:linear-gradient(90deg,#1f8fb0,#8fe3ff 70%,#ffb020 88%,#ff3b30 97%);transition:width .05s linear}
+  .imbar .sg{position:absolute;inset:0;
+    background:repeating-linear-gradient(90deg,transparent 0 3px,var(--oled-bg) 3px 5px)}
+  .imbar .thrmark{position:absolute;top:-1px;bottom:-1px;width:2px;background:var(--trig);opacity:.9}
+  .faderzone{display:flex;align-items:stretch;justify-content:center;flex:1;min-height:300px}
+  .faderzone>.fader{width:70px}
+  .fader{position:relative;background:var(--surface-lo);border:1px solid var(--edge);border-radius:3px;
+    cursor:ns-resize;touch-action:none;overflow:hidden}
+  .fader .slot{position:absolute;left:50%;top:12px;bottom:12px;width:6px;margin-left:-3px;background:#0a0b0d;border-radius:2px;
+    box-shadow:inset 0 0 4px #000}
+  .fader .ticks{position:absolute;inset:12px 0;display:flex;flex-direction:column;justify-content:space-between;padding:0 5px}
+  .fader .ticks span{height:1px;background:#2b3036}
+  .fader .cap{position:absolute;left:6px;right:6px;height:36px;border-radius:3px;
+    background:linear-gradient(180deg,#5a626c,#31363c 46%,#1d2126);border:1px solid #0a0b0d;
+    box-shadow:0 3px 7px rgba(0,0,0,.65),inset 0 1px 0 rgba(255,255,255,.22)}
+  .fader .cap::after{content:"";position:absolute;left:6px;right:6px;top:14px;height:2px;background:#0d0f11;border-radius:1px}
+  .fader .scalenums{position:absolute;left:3px;top:12px;bottom:12px;display:flex;
+    flex-direction:column;justify-content:space-between;pointer-events:none;
+    font-family:var(--mono);font-size:8px;color:#39424b}
+  .fdb{font-family:var(--mono);font-size:13px;color:var(--oled);text-align:center;
+    background:var(--oled-bg);border:1px solid #000;border-radius:3px;padding:4px 0;
+    box-shadow:inset 0 0 14px rgba(30,140,180,.14)}
+  .mfaders{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;flex:1;min-height:130px}
+  .mf{display:flex;flex-direction:column;gap:5px;align-items:stretch;min-height:0}
+  .mflbl{font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--text-dim);text-align:center}
+  .mf .fader{flex:1;min-height:110px}
+  .mf .cap{height:26px}
+  .mfval{font-family:var(--mono);font-size:12px;color:var(--oled);text-align:center}
+
+  .onoff{display:grid;grid-template-columns:1fr;gap:5px}
+  .big{border:1px solid var(--edge);border-radius:4px;padding:12px 0;text-align:center;cursor:pointer;user-select:none;
+    font-family:var(--mono);font-size:16px;font-weight:600;letter-spacing:.16em;color:#8d959e;
+    background:linear-gradient(180deg,#33383f,#1e2226);box-shadow:inset 0 1px 0 rgba(255,255,255,.08)}
+  .big.on-act{background:linear-gradient(180deg,#c22b22,#7d160f);color:#ffe3e0;border-color:#3d0704;
+    box-shadow:0 0 14px rgba(255,59,48,.4),inset 0 1px 0 rgba(255,255,255,.2)}
+  .big.off-act{background:linear-gradient(180deg,#3d434b,#25292e);color:#dfe4ea}
+
+  .trigrow{display:flex;align-items:center;gap:6px;padding:5px 6px;border-radius:3px;
+    background:#0e1114;border:1px solid var(--edge)}
+  .lamp{width:11px;height:11px;border-radius:50%;background:#2a2f35;flex:none;transition:background .1s,box-shadow .1s}
+  .lamp.cand{background:var(--prev);box-shadow:0 0 8px var(--prev)}
+  .lamp.act{background:var(--trig);box-shadow:0 0 10px var(--trig)}
+  .lamp.cool{background:#3a4552}
+  .lamp.sig.ok{background:var(--bus);box-shadow:0 0 8px var(--bus)}
+  .lamp.sig.alarm{background:var(--prev);box-shadow:0 0 9px var(--prev)}
+  .trigrow span{font-family:var(--mono);font-size:11px;letter-spacing:.1em;color:var(--text-dim);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  /* ---------- master / automation ---------- */
+  .master{background:linear-gradient(180deg,var(--surface-hi),var(--surface) 18%,var(--surface-lo));
+    border:1px solid var(--edge);border-radius:6px;padding:10px;display:flex;flex-direction:column;gap:9px;
+    height:100%;overflow:hidden}
+  .mtitle{font-size:10px;letter-spacing:.2em;color:var(--text-dim);text-transform:uppercase;
+    border-bottom:1px solid var(--hair);padding-bottom:5px}
+  .monsel{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
+  .knobrow{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:2px 0}
+  .knobrow>div{display:flex;flex-direction:column;align-items:center;gap:4px}
+  .fcount{font-family:var(--mono);font-size:12px;color:var(--text);
+    background:#1b1e22;border:1px solid var(--edge);border-radius:3px;padding:7px 8px}
+  .scenebar{display:flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap}
+  .wrap{transform-origin:top left}
+  .scenebar select{font-family:var(--mono);font-size:12px;color:var(--oled);
+    background:#05070a;border:1px solid var(--edge);border-radius:3px;padding:7px 8px;min-width:190px}
+  .sbtn{font-family:var(--mono);font-size:12px;letter-spacing:.06em;color:#c9d1d9;cursor:pointer;
+    background:linear-gradient(180deg,#33383f,#22262a);border:1px solid var(--edge);
+    border-radius:3px;padding:8px 12px;user-select:none}
+  .sbtn:hover{background:linear-gradient(180deg,#3b414a,#282d33)}
+  .sbtn.hot{background:linear-gradient(180deg,#2f6f47,#1e4a2f);color:#c6f4d8}
+  .bigknob{width:88px;height:88px;margin:2px auto;border-radius:50%;position:relative;cursor:ns-resize;touch-action:none;
+    background:radial-gradient(circle at 36% 28%,#525862,#2c3036 58%,#15171a 100%);
+    border:1px solid #0a0b0d;box-shadow:0 5px 12px rgba(0,0,0,.65),inset 0 1px 0 rgba(255,255,255,.14)}
+  .bigknob::after{content:"";position:absolute;left:50%;top:7px;width:3px;height:20px;margin-left:-1.5px;
+    background:var(--oled);border-radius:2px;transform-origin:50% 32px;box-shadow:0 0 7px rgba(143,227,255,.6)}
+  .autopanel{padding:8px;display:flex;flex-direction:column;gap:6px}
+  .autoline{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:11px}
+  .autoline b{color:var(--oled-dim);font-weight:500;letter-spacing:.08em}
+  .autoline i{color:var(--oled);font-style:normal}
+  .live{font-family:var(--mono);font-size:26px;color:var(--wide);letter-spacing:.04em;text-align:center;padding:4px 0}
+  .live.hot{color:var(--trig);text-shadow:0 0 12px rgba(255,45,120,.5)}
+  .log{height:190px;overflow-y:auto;padding:8px 9px;font-family:var(--mono);font-size:10.5px;line-height:1.5;color:var(--oled-dim)}
+  .log .fire{color:var(--trig)}
+  .log .rej{color:#5d6570}
+  .log .cut{color:var(--oled)}
+  .toggle{display:flex;justify-content:space-between;align-items:center;gap:6px;
+    font-family:var(--mono);font-size:11px;letter-spacing:.05em;color:#9aa4ae;
+    border:1px solid var(--edge);border-radius:3px;padding:10px 9px;cursor:pointer;user-select:none;
+    background:linear-gradient(180deg,#2c3138,#1e2226)}
+  .toggle .pill{font-size:10px;padding:3px 8px;border-radius:2px;background:#12151a;color:#6c757e}
+  .toggle.act .pill{background:#2f6f47;color:#c6f4d8}
+  .toggle.test.act .pill{background:#8a5c11;color:#ffdf9e}
+
+  /* painel de automação: sai da coluna do master, abre por cima */
+  .drawer{position:fixed;top:0;right:0;bottom:0;width:360px;z-index:50;
+    background:linear-gradient(180deg,#1e2126,#141619);border-left:1px solid var(--edge);
+    box-shadow:-18px 0 40px rgba(0,0,0,.55);padding:16px;overflow-y:auto;
+    transform:translateX(102%);transition:transform .18s ease;display:flex;flex-direction:column;gap:9px}
+  .drawer.open{transform:none}
+  .drawer h2{margin:0;font-size:12px;letter-spacing:.2em;text-transform:uppercase;color:var(--text)}
+  .drawer .close{position:absolute;top:12px;right:14px;cursor:pointer;color:var(--text-dim);
+    font-family:var(--mono);font-size:16px;user-select:none}
+  .drawer .log{height:auto;flex:1;min-height:220px}
+  .master{overflow:hidden}
+  /* painel de configuracoes */
+  .cfg{position:fixed;inset:0;z-index:80;background:rgba(6,7,9,.72);display:none;
+    align-items:center;justify-content:center;padding:24px}
+  .cfg.open{display:flex}
+  .cfgwrap{width:min(1080px,96vw);height:min(760px,92vh);display:grid;grid-template-columns:210px 1fr;
+    background:linear-gradient(180deg,#20242a,#15181c);border:1px solid var(--edge);border-radius:10px;
+    box-shadow:0 30px 70px rgba(0,0,0,.6);overflow:hidden}
+  .cfgtabs{background:#15181b;border-right:1px solid var(--edge);padding:14px 0;display:flex;flex-direction:column}
+  .cfgtabs h3{margin:0 16px 12px;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--text-dim)}
+  .cfgtab{padding:12px 16px;font-family:var(--mono);font-size:12px;color:#8d959e;cursor:pointer;
+    border-left:3px solid transparent}
+  .cfgtab:hover{background:#1c2025;color:var(--text)}
+  .cfgtab.act{background:#1c2025;color:var(--oled);border-left-color:var(--oled)}
+  .cfgbody{padding:20px 22px;overflow-y:auto}
+  .cfgbody h4{margin:0 0 4px;font-size:15px;letter-spacing:.04em;color:var(--text)}
+  .cfgbody p.hint{margin:0 0 16px;font-size:12px;color:var(--text-dim);line-height:1.5}
+  .cfgrow{display:grid;grid-template-columns:220px 1fr;align-items:center;gap:12px;
+    padding:9px 0;border-bottom:1px solid #24282d}
+  .cfglbl{font-size:13px;color:#aab3bc}
+  .cfg input,.cfg select{font-family:var(--mono);font-size:13px;color:var(--text);
+    background:#0e1114;border:1px solid var(--edge);border-radius:4px;padding:8px 9px;width:100%;max-width:280px}
+  .cfg input[type=checkbox]{width:20px;height:20px;max-width:20px}
+  .cfgnote{margin-top:14px;padding:10px 12px;border-radius:5px;background:#12161a;
+    border-left:3px solid var(--oled-dim);font-size:12px;color:var(--text-dim);line-height:1.55}
+  .cfgtable{width:100%;border-collapse:collapse;font-size:12px}
+  .cfgtable th{text-align:left;font-weight:500;color:var(--text-dim);font-size:11px;
+    letter-spacing:.08em;text-transform:uppercase;padding:6px 6px;border-bottom:1px solid #2c3138}
+  .cfgtable td{padding:5px 6px;border-bottom:1px solid #20242a}
+  .cfgtable input,.cfgtable select{padding:5px 6px;font-size:12px;max-width:none}
+  .chpanel{position:fixed;top:0;right:0;bottom:0;width:420px;z-index:75;padding:16px 18px;
+    background:linear-gradient(180deg,#20242a,#14171a);border-left:1px solid var(--edge);
+    box-shadow:-20px 0 44px rgba(0,0,0,.6);overflow-y:auto;
+    transform:translateX(102%);transition:transform .18s ease}
+  .chpanel.open{transform:none}
+  .chpanel h2{margin:0 0 2px;font-size:17px;color:var(--oled);letter-spacing:.03em}
+  .chpanel .sub{margin:0 0 14px;font-size:12px;color:var(--text-dim);font-family:var(--mono)}
+  .chsec{margin:16px 0 6px;display:flex;align-items:center;gap:8px;
+    font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--text-dim);
+    border-bottom:1px solid var(--hair);padding-bottom:6px}
+  .chsec .lk{font-size:12px;color:var(--prev)}
+  .chpanel input,.chpanel select{font-family:var(--mono);font-size:13px;color:var(--text);
+    background:#0e1114;border:1px solid var(--edge);border-radius:4px;padding:7px 8px;width:100%;max-width:200px}
+  .chpanel input[type=checkbox]{width:20px;height:20px;max-width:20px}
+  .chpanel input:disabled,.chpanel select:disabled{opacity:.4;cursor:not-allowed}
+  .chrow{display:grid;grid-template-columns:150px 1fr;align-items:center;gap:10px;
+    padding:7px 0;border-bottom:1px solid #22262b}
+  .chrow>div:first-child{font-size:13px;color:#aab3bc}
+  .rack{display:flex;flex-direction:column;gap:5px;margin-top:6px}
+  .dspslot{display:grid;grid-template-columns:22px 1fr 30px 30px;align-items:center;gap:6px;
+    background:#161a1e;border:1px solid var(--edge);border-radius:4px;padding:8px 9px;
+    font-family:var(--mono);font-size:12px;color:#9aa4ae}
+  .dspslot.on{color:#c6f4d8;border-color:#1e4a2f;background:linear-gradient(180deg,#1d2a22,#161a1e)}
+  .dspslot .dot{width:9px;height:9px;border-radius:50%;background:#2a2f35}
+  .dspslot.on .dot{background:var(--bus);box-shadow:0 0 8px var(--bus)}
+  .dspslot .mv{text-align:center;cursor:pointer;border-radius:3px;background:#0f1215;padding:3px 0}
+  .dspslot .mv:hover{background:#232830;color:var(--text)}
+  .dspslot.fixed{opacity:.75}
+  .chclose{float:right;cursor:pointer;color:var(--text-dim);font-family:var(--mono);font-size:18px}
+  .cfgclose{position:absolute;top:30px;right:34px;cursor:pointer;color:var(--text-dim);
+    font-family:var(--mono);font-size:20px;user-select:none;z-index:81}
+  .menubtn{font-family:var(--mono);font-size:12px;letter-spacing:.08em;color:#c9d1d9;cursor:pointer;
+    background:linear-gradient(180deg,#33383f,#22262a);border:1px solid var(--edge);
+    border-radius:4px;padding:8px 14px;user-select:none;margin-left:auto}
+  .menubtn:hover{background:linear-gradient(180deg,#3b414a,#282d33)}
+  .menu{position:fixed;top:14px;right:14px;z-index:70;width:330px;padding:14px;display:none;
+    background:linear-gradient(180deg,#22262c,#15181c);border:1px solid var(--edge);border-radius:8px;
+    box-shadow:0 22px 50px rgba(0,0,0,.6)}
+  .menu.open{display:block}
+  .menu .scenebar{flex-direction:column;align-items:stretch;margin-left:0;gap:7px}
+  .menu .sbtn{text-align:center;padding:10px 12px}
+  .menu select{width:100%}
+  .menu h3{margin:0 0 10px;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--text-dim)}
+  .footnote{position:absolute;left:-9999px}
+  .footnote-off{margin-top:12px;font-size:13px;color:var(--text-dim);line-height:1.6;max-width:900px}
+  .footnote code{font-family:var(--mono);color:#93a0ad}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div class="wrap">
+  <div class="topbar">
+    <h1>Superfície</h1>
+    <span id="zinfo" style="font-family:var(--mono)"></span>
+  </div>
+
+  <div class="chassis">
+    <!-- METER BRIDGE -->
+    <div class="bridge">
+      <div class="oled bridge-meters" id="bridgeA"></div>
+      <div class="oled bridge-meters" id="bridgeB"></div>
+      <div class="oled clockbox">
+        <div class="t" id="clock">--:--:--</div>
+        <div class="t2" id="timer">00:00</div>
+      </div>
+    </div>
+
+    <!-- SURFACE -->
+    <div class="surface" id="surface"></div>
+  </div>
+
+  <p class="footnote">
+    Arraste faders e encoders. <code>AUTOMAÇÃO</code> abre o painel com parâmetros do trigger e log.
+  </p>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------- modelo ----------
+  var SOURCES = ["MIC 1 · APRES","MIC 2 · CONV","MIC 3 · CONV","MIC 4 · PLATEIA",
+                 "PLAYOUT A","PLAYOUT B","TEL · VX 1","REMOTA IP"];
+  var TRIG_CH = 4;      // canais 1-4 com automação de câmera
+  var LAYERS  = 2;      // layer A = canais 1-8, layer B = 9-16
+  var layer   = 0;
+  var MODES   = ["ESTÉREO","ESQ","DIR","SOMA"];
+
+  var P = { threshold:-35, hysteresis:5, triggerTime:150, hold:800, release:400,
+            cooldown:500, minShot:1200, dominance:6, wideCam:5 };
+
+  var chans = [], bridgeMeters = [];
+
+  function makeChans(n){
+   chans=[];
+   for (var i=0;i<n;i++){
+    chans.push({
+      id:i+1, src:SOURCES[i%SOURCES.length], srcIdx:i%SOURCES.length,
+      cam: i<TRIG_CH ? i+1 : 0,
+      fader: i<4 ? .78 : .62, on: i<3, prev:false,
+      buses:{1:i<4, 2:false, 3:false, 4:false},
+      trim:0, pan:0, mode:0, param:0, netIdx:-1, type:5,
+      dsp:[{n:"Auto Trim",on:false,fixed:true},{n:"EQ paramétrico",on:true},
+           {n:"Compressor",on:false},{n:"Gate / Expander",on:false},
+           {n:"De-esser",on:false},{n:"Limiter",on:false}],
+      level:-70, peak:-70,
+      speaking:false, nextFlip: 800+Math.random()*2500,
+      st:"IDLE", tState:0, belowT:0,
+      cmd:"", cmdRelease:"", cmdTarget:0,
+      logic:false, logicTarget:1, onCmd:"", offCmd:"",
+      presence:{silence:1e9, ever:false, peak:-100},
+      cal:{running:false, elapsed:0, floor:0, speech:-100, first:true}
+    });
+   }
+  }
+
+  var auto = { enabled:true, test:false, dominance:true,
+               live:P.wideCam, lastCut:-9999, holdUntil:0, t:0 };
+  var log = [];
+
+  // ---------- helpers ----------
+  function el(tag,cls,html){ var e=document.createElement(tag); if(cls)e.className=cls;
+    if(html!=null)e.innerHTML=html; return e; }
+  function dbToPct(db){ return Math.max(0,Math.min(100,(db+60)/60*100)); }
+  function faderDb(v){ return v<=0 ? -Infinity : -60 + v*70; } // topo = +10
+  function fmt(db){ return db<=-59.5 ? "-∞" : (db>0?"+":"")+db.toFixed(1); }
+  function now(){ return auto.t; }
+
+  function addLog(cls,txt){
+    var d=new Date(), ts=("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+
+      ":"+("0"+d.getSeconds()).slice(-2)+"."+("00"+d.getMilliseconds()).slice(-3);
+    log.unshift({cls:cls,txt:ts+"  "+txt});
+    if(log.length>60) log.pop();
+    var box=document.getElementById("log");
+    if(box) box.innerHTML = log.map(function(l){return '<div class="'+l.cls+'">'+l.txt+'</div>';}).join("");
+  }
+
+  // ---------- construção da superfície ----------
+  var surface=document.getElementById("surface");
+
+  function buildStrips(){
+   chans.forEach(function(c){ c.ui=null; });
+   chans.slice(layer*faderCount,(layer+1)*faderCount).forEach(function(c,idx){
+    var strip=el("div","strip");
+
+    var oled=el("div","oled strip-oled");
+    var src=el("div","src",c.src);
+    var sub=el("div","sub",'<span class="pname">TRIM</span><span class="trimv">0.0</span>');
+    var cam=el("div","cam", c.cam ? "CAM "+c.cam+" · AUTO" : "SEM AUTOMAÇÃO");
+    oled.appendChild(src); oled.appendChild(sub); oled.appendChild(cam);
+    strip.appendChild(oled);
+
+    var soft=el("div","btn soft","SOFT \u22EF");
+    soft.setAttribute("tabindex","0");
+    soft.addEventListener("click",function(){ openChannel(c); });
+    strip.appendChild(soft);
+
+    var buses=el("div","buses");
+    var busBtns={};
+    [1,2,3,4].forEach(function(b){
+      var bb=el("div","btn bus"+(c.buses[b]?" act":""),"PGM "+b);
+      bb.setAttribute("tabindex","0");
+      bb.addEventListener("click",function(){ c.buses[b]=!c.buses[b]; bb.classList.toggle("act",c.buses[b]); });
+      buses.appendChild(bb); busBtns[b]=bb;
+    });
+    strip.appendChild(buses);
+
+    var prev=el("div","btn prev","PREV"); prev.setAttribute("tabindex","0");
+    prev.addEventListener("click",function(){ c.prev=!c.prev; prev.classList.toggle("act",c.prev); });
+    strip.appendChild(prev);
+
+    // modulação de entrada (o que o trigger enxerga) e pós-trim
+    var im=el("div","inmeters");
+    function imrow(lbl,withThr){
+      var r=el("div","imrow"); r.appendChild(el("b","",lbl));
+      var bar=el("div","imbar"), f=el("div","f"), sg=el("div","sg");
+      bar.appendChild(f); bar.appendChild(sg);
+      var mark=null;
+      if(withThr){ mark=el("div","thrmark"); bar.appendChild(mark); }
+      r.appendChild(bar); im.appendChild(r);
+      return {f:f,mark:mark};
+    }
+    var mIn   = imrow("IN",true);
+    var mTrim = imrow("TRIM",false);
+    strip.appendChild(im);
+
+    var fz=el("div","faderzone");
+    var fader=el("div","fader");
+    var slot=el("div","slot"); var ticks=el("div","ticks");
+    for(var t=0;t<8;t++) ticks.appendChild(el("span"));
+    var nums=el("div","scalenums");
+    ["+10","0","-10","-20","-30","-40","-50","-∞"].forEach(function(v){
+      nums.appendChild(el("span","",v));
+    });
+    fader.appendChild(nums);
+    var cap=el("div","cap");
+    fader.appendChild(slot); fader.appendChild(ticks); fader.appendChild(cap);
+    fz.appendChild(fader);
+    strip.appendChild(fz);
+
+    var fdb=el("div","fdb","-∞");
+    strip.appendChild(fdb);
+
+    var onoff=el("div","onoff");
+    var bOn=el("div","big"+(c.on?" on-act":""),"ON");
+    var bOff=el("div","big"+(!c.on?" off-act":""),"OFF");
+    bOn.setAttribute("tabindex","0"); bOff.setAttribute("tabindex","0");
+    function setOn(v){ c.on=v; bOn.classList.toggle("on-act",v); bOff.classList.toggle("off-act",!v); }
+
+    /** Apertar ON/OFF manda o comando SEMPRE — inclusive com o canal já naquele
+        estado. Relançar o cartucho é ação explícita do operador, não repetição
+        de estado; a detecção por borda continua valendo para o resto. */
+    function pressLogic(on){
+      var repetido = (c.on===on);
+      setOn(on);
+      if(!c.logic) return;
+      var txt = on ? c.onCmd : c.offCmd;
+      if(!txt) return;
+      c._prevOn = on;                       // evita a borda disparar de novo
+      sendReal(c.logicTarget, txt, "CH0"+c.id+(repetido?"  [reenvio]  ":"  "));
+    }
+    bOn .addEventListener("click",function(){ pressLogic(true);  });
+    bOff.addEventListener("click",function(){ pressLogic(false); });
+    onoff.appendChild(bOn); onoff.appendChild(bOff);   // ON em cima, OFF embaixo
+    strip.appendChild(onoff);
+
+    var tr=el("div","trigrow");
+    var siglamp=el("div","lamp sig"); siglamp.title="sinal na entrada";
+    var lamp=el("div","lamp"); var tlbl=el("span","","IDLE");
+    tr.appendChild(siglamp); tr.appendChild(lamp); tr.appendChild(tlbl);
+    strip.appendChild(tr);
+
+    surface.appendChild(strip);
+
+    // fader drag
+    function faderFromEvent(ev){
+      var r=fader.getBoundingClientRect();
+      var y=(ev.clientY!=null?ev.clientY:ev.touches[0].clientY)-r.top;
+      c.fader=Math.max(0,Math.min(1,1-(y-18)/(r.height-36)));
+    }
+    fader.addEventListener("pointerdown",function(ev){
+      fader.setPointerCapture(ev.pointerId); faderFromEvent(ev);
+      fader.onpointermove=function(e){ faderFromEvent(e); };
+      fader.onpointerup=function(){ fader.onpointermove=null; };
+    });
+
+    c.ui={cap:cap,lamp:lamp,siglamp:siglamp,tlbl:tlbl,fdb:fdb,mIn:mIn,mTrim:mTrim,
+          trimv:sub.querySelector(".trimv"),pname:sub.querySelector(".pname"),cam:cam};
+   });
+  }
+
+  // ---------- master ----------
+  var master=el("div","master");
+  master.appendChild(el("div","mtitle","monitor · controle"));
+  var crDisp=el("div","oled autopanel");
+  crDisp.innerHTML='<div class="autoline"><b>MONITOR CR</b><i id="crsrc">PGM 1</i></div>'+
+                   '<div class="autoline"><b>ESTÚDIO</b><i id="stsrc">PGM 1</i></div>';
+  master.appendChild(crDisp);
+
+  function group(labels,cols,onPick,actIdx){
+    var g=el("div","monsel"); g.style.gridTemplateColumns="repeat("+cols+",1fr)";
+    labels.forEach(function(n,i){
+      var b=el("div","btn bus"+(i===actIdx?" act":""),n); b.setAttribute("tabindex","0");
+      b.addEventListener("click",function(){
+        g.querySelectorAll(".btn").forEach(function(x){x.classList.remove("act");});
+        b.classList.add("act"); if(onPick) onPick(n);
+      });
+      g.appendChild(b);
+    });
+    return g;
+  }
+  master.appendChild(group(["PGM 1","PGM 2","PGM 3","PGM 4","EXT 1","EXT 2"],3,function(n){
+    document.getElementById("crsrc").textContent=n;
+  },0));
+
+  // faders pequenos no lugar dos knobs: encoder rotativo e ruim em tela de toque
+  function miniFader(label, init){
+    var col=el("div","mf"), st={v:init};
+    col.appendChild(el("div","mflbl",label));
+
+    var f=el("div","fader"), slot=el("div","slot"), ticks=el("div","ticks");
+    for(var t=0;t<6;t++) ticks.appendChild(el("span"));
+    var cap=el("div","cap");
+    f.appendChild(slot); f.appendChild(ticks); f.appendChild(cap);
+    col.appendChild(f);
+
+    var val=el("div","mfval","");
+    col.appendChild(val);
+
+    function paint(){
+      cap.style.bottom="calc("+(st.v*100)+"% - "+(st.v*26)+"px + 12px)";
+      val.textContent = st.v<=0.01 ? "-∞" : (-60+st.v*60).toFixed(0)+" dB";
+    }
+    function fromEvent(ev){
+      var r=f.getBoundingClientRect();
+      st.v=Math.max(0,Math.min(1,1-((ev.clientY-r.top)-13)/(r.height-26)));
+      paint();
+    }
+    f.addEventListener("pointerdown",function(ev){
+      f.setPointerCapture(ev.pointerId); fromEvent(ev);
+      f.onpointermove=function(e){ fromEvent(e); };
+      f.onpointerup=function(){ f.onpointermove=null; };
+    });
+    paint();
+    return col;
+  }
+
+  var mf=el("div","mfaders");
+  mf.appendChild(miniFader("MONITOR",.72));
+  mf.appendChild(miniFader("FONE",.66));
+  mf.appendChild(miniFader("CUE",.58));
+  master.appendChild(mf);
+
+  var keys=el("div","monsel"); keys.style.gridTemplateColumns="repeat(3,1fr)";
+  ["TALK BF","TALK EST","REC","PERFIL","METER","RELÓGIO"].forEach(function(n){
+    var b=el("div","btn",n); b.setAttribute("tabindex","0");
+    b.addEventListener("click",function(){ b.classList.toggle("act"); b.classList.toggle("bus"); });
+    keys.appendChild(b);
+  });
+  master.appendChild(keys);
+
+  master.appendChild(el("div","mtitle","estúdio · timer"));
+  master.appendChild(group(["PGM 1","PGM 2","PGM 3","EXT 1"],4,function(n){
+    document.getElementById("stsrc").textContent=n;
+  },0));
+  var trow=el("div","monsel"); trow.style.gridTemplateColumns="repeat(2,1fr)";
+  ["RESET","RUN/STOP"].forEach(function(n){
+    var b=el("div","btn",n); b.setAttribute("tabindex","0");
+    b.addEventListener("click",function(){
+      if(n==="RESET") timer0=performance.now();
+      else { b.classList.toggle("act"); b.classList.toggle("bus"); }
+    });
+    trow.appendChild(b);
+  });
+  master.appendChild(trow);
+
+  master.appendChild(el("div","mtitle","automação de câmeras"));
+  var live=el("div","oled live","CAM "+P.wideCam);
+  master.appendChild(live);
+
+  var drawer=el("div","drawer");
+  drawer.appendChild(el("div","close","\u2715")).addEventListener("click",function(){
+    drawer.classList.remove("open");
+  });
+  drawer.appendChild(el("h2","","Automação de câmeras"));
+  document.body.appendChild(drawer);
+
+  var openBtn=el("div","btn","AUTOMAÇÃO \u22EF"); openBtn.setAttribute("tabindex","0");
+  openBtn.addEventListener("click",function(){ drawer.classList.toggle("open"); });
+  master.appendChild(openBtn);
+
+  var tg1=el("div","toggle act",'<span>AUTOMAÇÃO GERAL</span><span class="pill">ON</span>');
+  var tg2=el("div","toggle test",'<span>MODO DE TESTE</span><span class="pill">OFF</span>');
+  var tg3=el("div","toggle act",'<span>DOMINÂNCIA</span><span class="pill">ON</span>');
+  tg1.setAttribute("tabindex","0"); tg2.setAttribute("tabindex","0"); tg3.setAttribute("tabindex","0");
+  tg1.addEventListener("click",function(){ auto.enabled=!auto.enabled;
+    tg1.classList.toggle("act",auto.enabled); tg1.querySelector(".pill").textContent=auto.enabled?"ON":"OFF";
+    addLog("cut","AUTOMAÇÃO GERAL "+(auto.enabled?"HABILITADA":"DESABILITADA")); });
+  tg2.addEventListener("click",function(){ auto.test=!auto.test;
+    tg2.classList.toggle("act",auto.test); tg2.querySelector(".pill").textContent=auto.test?"ON":"OFF";
+    addLog("cut","MODO DE TESTE "+(auto.test?"ON — nada é enviado ao vMix":"OFF")); });
+  tg3.addEventListener("click",function(){ auto.dominance=!auto.dominance;
+    tg3.classList.toggle("act",auto.dominance); tg3.querySelector(".pill").textContent=auto.dominance?"ON":"OFF";
+    addLog("cut","REGRA DE DOMINÂNCIA "+(auto.dominance?"ON":"OFF — vazamento vai disparar canais errados")); });
+  drawer.appendChild(tg1); drawer.appendChild(tg2); drawer.appendChild(tg3);
+
+  var ap=el("div","oled autopanel");   // painel de parametros, redesenhado ao trocar de cena
+  ap.innerHTML =
+    '<div class="autoline"><b>THRESHOLD</b><i>'+P.threshold+' dBFS</i></div>'+
+    '<div class="autoline"><b>TRIGGER TIME</b><i>'+P.triggerTime+' ms</i></div>'+
+    '<div class="autoline"><b>HISTERESE</b><i>'+P.hysteresis+' dB</i></div>'+
+    '<div class="autoline"><b>HOLD</b><i>'+P.hold+' ms</i></div>'+
+    '<div class="autoline"><b>RELEASE</b><i>'+P.release+' ms</i></div>'+
+    '<div class="autoline"><b>COOLDOWN</b><i>'+P.cooldown+' ms</i></div>'+
+    '<div class="autoline"><b>PLANO MÍN.</b><i>'+P.minShot+' ms</i></div>'+
+    '<div class="autoline"><b>CÂM. GERAL</b><i>CAM '+P.wideCam+'</i></div>';
+  drawer.appendChild(el("div","mtitle","parâmetros do trigger"));
+  drawer.appendChild(ap);
+
+  drawer.appendChild(el("div","mtitle","envio de comandos"));
+  var sendBox=el("div","oled autopanel"); sendBox.id="sendbox";
+  drawer.appendChild(sendBox);
+
+  drawer.appendChild(el("div","mtitle","testes"));
+  var sweep=el("div","toggle");
+  sweep.innerHTML='<span>TESTAR TODAS AS CÂMERAS</span><span class="pill">IR</span>';
+  sweep.setAttribute("tabindex","0");
+  sweep.addEventListener("click",function(){
+    var cams=chans.filter(function(c){ return c.cam>0; })
+                  .map(function(c){ return c.cam; })
+                  .filter(function(v,i,a){ return a.indexOf(v)===i; });
+    if(!cams.length){ addLog("rej","nenhuma câmera mapeada"); return; }
+    cams.forEach(function(cam,i){
+      setTimeout(function(){
+        if(auto.test) addLog("fire","[VARREDURA] ENVIARIA: CUT → CAM "+cam);
+        else { auto.live=cam; addLog("fire","[VARREDURA] CUT → CAM "+cam); }
+      }, i*900);
+    });
+  });
+  drawer.appendChild(sweep);
+
+  drawer.appendChild(el("div","mtitle","log de automação"));
+  var logbox=el("div","oled log"); logbox.id="log"; drawer.appendChild(logbox);
+
+  var zoomMode="auto", faderCount=8;
+
+  /** Ajusta a mesa ao tamanho da janela: em monitor grande ela cresce em vez de
+      ficar espremida num canto; em tela pequena ela encolhe em vez de rolar. */
+  function applyZoom(){
+    var wrap=document.querySelector(".wrap");
+    var need=faderCount*100+350;
+
+    // mede a altura natural em escala 1 antes de decidir o zoom
+    wrap.style.minWidth=need+"px";
+    wrap.style.zoom=1; wrap.style.transform="";
+    var natH=Math.max(1, wrap.scrollHeight);
+
+    var z;
+    if(zoomMode==="auto"){
+      var byW=(window.innerWidth -40)/need;
+      var byH=(window.innerHeight-40)/natH;
+      z=Math.max(0.78, Math.min(2.6, Math.min(byW,byH)));   // cabe inteira; abaixo de 78% prefere rolar
+    } else if(zoomMode==="width"){
+      z=Math.max(0.45, Math.min(2.6, (window.innerWidth-40)/need));
+    } else {
+      z=parseFloat(zoomMode);
+    }
+
+    if("zoom" in document.body.style){ wrap.style.zoom=z; }
+    else { wrap.style.transform="scale("+z+")"; document.body.style.height=(natH*z+40)+"px"; }
+    document.getElementById("zinfo").textContent=
+      Math.round(z*100)+"%  ·  "+window.innerWidth+"x"+window.innerHeight;
+  }
+  window.addEventListener("resize",applyZoom);
+
+  function build(n){
+    faderCount=n;
+    if(chans.length!==n*LAYERS) makeChans(n*LAYERS);
+    if(layer>=LAYERS) layer=0;
+    while(surface.firstChild) surface.removeChild(surface.firstChild);
+    surface.appendChild(layerCol);
+    buildStrips();
+    surface.style.gridTemplateColumns="64px repeat("+n+",minmax(92px,1fr)) 250px";
+    surface.appendChild(master);
+    syncLayerBtns();
+    applyZoom();
+  }
+
+  var sel=document.createElement("select"); sel.className="fcount";
+  [8,12,16].forEach(function(n){
+    var o=document.createElement("option"); o.value=n; o.textContent=n+" faders/layer";
+    sel.appendChild(o);
+  });
+  sel.value="8";
+  sel.addEventListener("change",function(){ build(parseInt(sel.value,10)); });
+
+  // ---------- cenas (show profiles) ----------
+  var scenes = {}, currentScene = "PADRÃO";
+
+  function captureScene(name){
+    return {
+      format:1, name:name,
+      automation:{ enabled:auto.enabled, testMode:auto.test, dominance:auto.dominance,
+                   dominanceDb:P.dominance, minShotMs:P.minShot, wideCamera:P.wideCam },
+      trigger:{ thresholdDb:P.threshold, triggerMs:P.triggerTime, holdMs:P.hold,
+                releaseMs:P.release, cooldownMs:P.cooldown, hysteresisDb:P.hysteresis },
+      channels: chans.map(function(c){
+        return { name:c.src, srcIdx:c.srcIdx, faderDb:+(faderDb(c.fader)).toFixed(2),
+                 fader:+c.fader.toFixed(4), trimDb:+c.trim.toFixed(2), pan:+c.pan.toFixed(2),
+                 mode:c.mode, on:c.on, cue:c.prev, cmd:c.cmd, cmdRelease:c.cmdRelease,
+                 buses:[c.buses[1],c.buses[2],c.buses[3],c.buses[4]], camera:c.cam };
+      })
+    };
+  }
+
+  function applyScene(sc){
+    if(!sc || !sc.channels) return;
+    if(sc.channels.length !== chans.length) makeChans(sc.channels.length);
+    var pend=0;
+    sc.channels.forEach(function(cs,i){
+      var c=chans[i];
+      if(c.on && (cs.name!==c.src || !cs.on)){ pend++; return; }   // não derruba o que está no ar
+      c.src=cs.name; c.srcIdx=(cs.srcIdx||0)%SOURCES.length;
+      c.fader=cs.fader; c.trim=cs.trimDb; c.pan=cs.pan; c.mode=cs.mode||0;
+      c.on=cs.on; c.prev=cs.cue; c.cam=cs.camera;
+      c.cmd=cs.cmd||""; c.cmdRelease=cs.cmdRelease||"";
+      c.buses={1:cs.buses[0],2:cs.buses[1],3:cs.buses[2],4:cs.buses[3]};
+    });
+    if(sc.trigger){ P.threshold=sc.trigger.thresholdDb; P.triggerTime=sc.trigger.triggerMs;
+      P.hold=sc.trigger.holdMs; P.release=sc.trigger.releaseMs;
+      P.cooldown=sc.trigger.cooldownMs; P.hysteresis=sc.trigger.hysteresisDb; }
+    if(sc.automation){ auto.enabled=sc.automation.enabled; auto.test=sc.automation.testMode;
+      auto.dominance=sc.automation.dominance; P.dominance=sc.automation.dominanceDb;
+      P.minShot=sc.automation.minShotMs; P.wideCam=sc.automation.wideCamera; }
+    build(Math.max(1, Math.round(chans.length/LAYERS)));
+    syncToggles(); refreshAutoPanel();
+    currentScene=sc.name;
+    addLog("cut","CENA CARREGADA · "+sc.name+(pend?"   ("+pend+" canal(is) pendente(s), no ar)":""));
+  }
+
+  function syncToggles(){
+    tg1.classList.toggle("act",auto.enabled); tg1.querySelector(".pill").textContent=auto.enabled?"ON":"OFF";
+    tg2.classList.toggle("act",auto.test);    tg2.querySelector(".pill").textContent=auto.test?"ON":"OFF";
+    tg3.classList.toggle("act",auto.dominance);tg3.querySelector(".pill").textContent=auto.dominance?"ON":"OFF";
+  }
+  function refreshAutoPanel(){
+    ap.innerHTML =
+      '<div class="autoline"><b>THRESHOLD</b><i>'+P.threshold+' dBFS</i></div>'+
+      '<div class="autoline"><b>TRIGGER TIME</b><i>'+P.triggerTime+' ms</i></div>'+
+      '<div class="autoline"><b>HISTERESE</b><i>'+P.hysteresis+' dB</i></div>'+
+      '<div class="autoline"><b>HOLD</b><i>'+P.hold+' ms</i></div>'+
+      '<div class="autoline"><b>RELEASE</b><i>'+P.release+' ms</i></div>'+
+      '<div class="autoline"><b>COOLDOWN</b><i>'+P.cooldown+' ms</i></div>'+
+      '<div class="autoline"><b>PLANO MÍN.</b><i>'+P.minShot+' ms</i></div>'+
+      '<div class="autoline"><b>CÂM. GERAL</b><i>CAM '+P.wideCam+'</i></div>';
+  }
+
+  // barra de cenas
+  var layerCol=el("div","layercol"), layerBtns=[];
+  ["A","B"].forEach(function(name,i){
+    var b=el("div","layerbtn"+(i===0?" act":""),
+             "<b>"+name+"</b><span>LAYER</span><span class='rng'></span>");
+    b.setAttribute("tabindex","0");
+    b.addEventListener("click",function(){
+      layer=i;
+      build(faderCount);
+      addLog("cut","LAYER "+name+" · canais "+(i*faderCount+1)+"-"+((i+1)*faderCount));
+    });
+    layerBtns.push(b); layerCol.appendChild(b);
+  });
+  function syncLayerBtns(){
+    layerBtns.forEach(function(b,i){
+      b.classList.toggle("act", i===layer);
+      b.querySelector(".rng").textContent=(i*faderCount+1)+"-"+((i+1)*faderCount);
+    });
+  }
+
+  var bar=el("div","scenebar");
+  var scSel=document.createElement("select");
+  function refreshSceneList(sel){
+    scSel.innerHTML="";
+    Object.keys(scenes).forEach(function(k){
+      var o=document.createElement("option"); o.value=k; o.textContent=k; scSel.appendChild(o);
+    });
+    scSel.value = sel || currentScene;
+  }
+  function sbtn(label,fn,hot){
+    var b=el("div","sbtn"+(hot?" hot":""),label); b.setAttribute("tabindex","0");
+    b.addEventListener("click",fn); return b;
+  }
+
+  bar.appendChild(scSel);
+  bar.appendChild(sbtn("CARREGAR",function(){ applyScene(scenes[scSel.value]); }));
+  bar.appendChild(sbtn("SALVAR",function(){
+    scenes[scSel.value]=captureScene(scSel.value);
+    addLog("cut","CENA SALVA · "+scSel.value);
+  },true));
+  bar.appendChild(sbtn("SALVAR COMO",function(){
+    var n=prompt("Nome da cena:", "CENA "+(Object.keys(scenes).length+1));
+    if(!n) return;
+    scenes[n]=captureScene(n); currentScene=n; refreshSceneList(n);
+    addLog("cut","CENA CRIADA · "+n);
+  }));
+  bar.appendChild(sbtn("EXPORTAR",function(){
+    var sc=scenes[scSel.value]||captureScene(scSel.value);
+    var blob=new Blob([JSON.stringify(sc,null,2)],{type:"application/json"});
+    var a=document.createElement("a");
+    a.href=URL.createObjectURL(blob); a.download=sc.name.replace(/\s+/g,"_")+".cena.json";
+    a.click(); URL.revokeObjectURL(a.href);
+  }));
+  var fileIn=document.createElement("input");
+  fileIn.type="file"; fileIn.accept=".json"; fileIn.style.display="none";
+  fileIn.addEventListener("change",function(){
+    var f=fileIn.files[0]; if(!f) return;
+    var rd=new FileReader();
+    rd.onload=function(){
+      try{
+        var sc=JSON.parse(rd.result);
+        scenes[sc.name]=sc; refreshSceneList(sc.name); applyScene(sc);
+      }catch(e){ addLog("rej","arquivo de cena inválido"); }
+    };
+    rd.readAsText(f);
+  });
+  bar.appendChild(sbtn("IMPORTAR",function(){ fileIn.click(); }));
+  var zoomSel=document.createElement("select"); zoomSel.className="fcount";
+  [["auto","caber na tela"],["width","preencher a largura"],["1","100%"],["1.25","125%"],
+   ["1.5","150%"],["1.75","175%"],["2","200%"],["2.5","250%"]]
+    .forEach(function(o){
+      var op=document.createElement("option"); op.value=o[0]; op.textContent=o[1]; zoomSel.appendChild(op);
+    });
+  zoomSel.addEventListener("change",function(){ zoomMode=zoomSel.value; applyZoom(); });
+  bar.appendChild(zoomSel);
+  bar.appendChild(fileIn);
+  bar.appendChild(sel);
+
+
+  // ---------------- menu do canal (tecla SOFT) ----------------
+  var chPanel=el("div","chpanel");
+  document.body.appendChild(chPanel);
+
+  function chRow(label,ctrl,allowed){
+    var r=el("div","chrow"); r.appendChild(el("div","",label));
+    if(!allowed && ctrl.querySelectorAll)
+      [ctrl].concat([].slice.call(ctrl.querySelectorAll("input,select")))
+        .forEach(function(x){ if(x.tagName==="INPUT"||x.tagName==="SELECT") x.disabled=true; });
+    if(!allowed && (ctrl.tagName==="INPUT"||ctrl.tagName==="SELECT")) ctrl.disabled=true;
+    r.appendChild(ctrl); return r;
+  }
+  function chSec(title,area){
+    var h=el("div","chsec",title);
+    if(area && !can(area)){
+      var lk=el("span","lk","\u{1F512} bloqueado para "+PROFILE);
+      h.appendChild(lk);
+    }
+    return h;
+  }
+
+  function calReady(c){ return c.cal.elapsed>5000 && (c.cal.speech-c.cal.floor)>12; }
+  function calSuggestion(c){
+    var f=c.cal.floor, sp=c.cal.speech, mid=f+(sp-f)*0.45;
+    return Math.max(f+8, Math.min(sp-8, mid));
+  }
+  function cmdOf(c){ return c.cmd ? c.cmd : ("FUNCTION Cut Input="+c.cam); }
+  function testFire(c){
+    if(!c.cam && !c.cmd){ addLog("rej","CH0"+c.id+"  teste ignorado: sem câmera e sem comando"); return; }
+    var txt=cmdOf(c);
+    if(auto.test){ addLog("fire","CH0"+c.id+"  [TESTE] ENVIARIA → "+txt); return; }
+    if(c.cam){ auto.live=c.cam; }
+    auto.lastCut=now();
+    sendReal(c.cmdTarget, txt, "CH0"+c.id+"  [TESTE] ");
+  }
+
+  var calUI=null;   // readout ao vivo enquanto o painel do canal está aberto
+
+  function openChannel(c){
+    chPanel.innerHTML="";
+    var close=el("div","chclose","\u2715");
+    close.addEventListener("click",function(){ chPanel.classList.remove("open"); });
+    chPanel.appendChild(close);
+    chPanel.appendChild(el("h2","",c.src));
+    chPanel.appendChild(el("p","sub","CANAL "+c.id+"  ·  "+
+      (CURRENT_USER? CURRENT_USER+" · ":"")+PROFILE));
+
+    // ---- fonte
+    chPanel.appendChild(chSec("Fonte","fonte"));
+    chPanel.appendChild(chRow("Nome",
+      fld("input",{value:c.src},function(e){ c.src=e.target.value; build(faderCount); }), can("fonte")));
+    chPanel.appendChild(chRow("Tipo",
+      pick(SRC_TYPES,SRC_TYPES[c.type||0],function(v){ c.type=SRC_TYPES.indexOf(v); }), can("fonte")));
+    chPanel.appendChild(chRow("Origem",
+      pick([{v:"placa",t:"Placa (ASIO)"},{v:"rede",t:"Rede (NDI)"}], c.netIdx>=0?"rede":"placa",
+        function(v){ c.netIdx=(v==="rede")?0:-1; openChannel(c); }), can("fonte")));
+    if(c.netIdx>=0)
+      chPanel.appendChild(chRow("Emissor",
+        pick(NETSRC.map(function(n,j){ return {v:j,t:n.name}; }),c.netIdx,
+          function(v){ c.netIdx=+v; }), can("fonte")));
+
+    // ---- ganho
+    chPanel.appendChild(chSec("Ganho e pan","ganho"));
+    chPanel.appendChild(chRow("Trim (dB)",
+      fld("input",{type:"number",step:"0.5",value:c.trim.toFixed(1)},
+        function(e){ c.trim=+e.target.value; }), can("ganho")));
+    chPanel.appendChild(chRow("Auto Trim",
+      fld("input",{type:"checkbox",checked:!!c.autoTrim},
+        function(e){ c.autoTrim=e.target.checked; }), can("ganho")));
+    chPanel.appendChild(chRow("Alvo do Auto Trim (dB)",
+      fld("input",{type:"number",value:c.atTarget||-20},
+        function(e){ c.atTarget=+e.target.value; }), can("ganho")));
+    chPanel.appendChild(chRow("Pan",
+      fld("input",{type:"number",step:"1",value:Math.round(c.pan)},
+        function(e){ c.pan=+e.target.value; }), can("ganho")));
+    chPanel.appendChild(chRow("Modo",
+      pick(MODES,MODES[c.mode||0],function(v){ c.mode=MODES.indexOf(v); }), can("ganho")));
+
+    // ---- buses
+    chPanel.appendChild(chSec("Atribuição de buses","buses"));
+    [1,2,3,4].forEach(function(b){
+      chPanel.appendChild(chRow("PGM "+b,
+        fld("input",{type:"checkbox",checked:!!c.buses[b]},function(e){
+          c.buses[b]=e.target.checked; build(faderCount);
+        }), can("buses")));
+    });
+    if(c.type===6||c.type===7||c.type===9)
+      chPanel.appendChild(chRow("Feed to source",
+        pick(["Desabilitado","Auto (PGM1/Phone)","PGM 1","PGM 2","PGM 3","PGM 4","Só talkback"],
+             c.feed||"Auto (PGM1/Phone)",function(v){ c.feed=v; }), can("buses")));
+
+    // ---- rack de DSP
+    chPanel.appendChild(chSec("Rack de DSP","dsp"));
+    var rack=el("div","rack");
+    c.dsp.forEach(function(p,i){
+      var sl=el("div","dspslot"+(p.on?" on":"")+(p.fixed?" fixed":""));
+      sl.appendChild(el("div","dot"));
+      sl.appendChild(el("div","",p.n+(p.fixed?"  (estrutural)":"")));
+      var up=el("div","mv","\u25B2"), dn=el("div","mv","\u25BC");
+      sl.appendChild(up); sl.appendChild(dn);
+      if(can("dsp")){
+        sl.addEventListener("click",function(e){
+          if(e.target===up||e.target===dn) return;
+          p.on=!p.on; openChannel(c);
+        });
+        up.addEventListener("click",function(){
+          if(i>0 && !c.dsp[i-1].fixed && !p.fixed){
+            var t=c.dsp[i-1]; c.dsp[i-1]=p; c.dsp[i]=t; openChannel(c);
+          }
+        });
+        dn.addEventListener("click",function(){
+          if(i<c.dsp.length-1 && !p.fixed){
+            var t=c.dsp[i+1]; c.dsp[i+1]=p; c.dsp[i]=t; openChannel(c);
+          }
+        });
+      } else { sl.style.opacity=".45"; }
+      rack.appendChild(sl);
+    });
+    chPanel.appendChild(rack);
+    if(can("dsp")){
+      var addv=el("div","sbtn","+ ADICIONAR VST3"); addv.style.marginTop="8px";
+      addv.addEventListener("click",function(){
+        var n=prompt("Nome do plugin VST3:","FabFilter Pro-Q");
+        if(n){ c.dsp.push({n:n,on:true}); openChannel(c); }
+      });
+      chPanel.appendChild(addv);
+    }
+
+    // ---- trigger
+    chPanel.appendChild(chSec("Trigger de câmera","trigger"));
+    chPanel.appendChild(chRow("Habilitado",
+      fld("input",{type:"checkbox",checked:!!c.cam},function(e){ c.cam=e.target.checked?c.id:0; }),
+      can("trigger")));
+    chPanel.appendChild(chRow("Câmera",
+      fld("input",{type:"number",value:c.cam||0},function(e){ c.cam=+e.target.value; }), can("trigger")));
+    chPanel.appendChild(chRow("Fonte de medição",
+      pick(["Entrada","Pós Auto Trim","Pós DSP","Pós fader"],"Entrada",function(){}), can("trigger")));
+    var cmdField=fld("input",{value:c.cmd, placeholder:"vazio = CUT pela câmera"},
+      function(e){ c.cmd=e.target.value.trim(); });
+    cmdField.style.maxWidth="230px";
+    chPanel.appendChild(chRow("Comando ao disparar", cmdField, can("trigger")));
+    chPanel.appendChild(chRow("Destino do comando",
+      pick(TARGETS.map(function(t,i){ return {v:i,t:t.name+" ("+t.proto+" "+t.port+")"}; }),
+        c.cmdTarget,function(v){ c.cmdTarget=+v; }), can("trigger")));
+    chPanel.appendChild(chRow("Comando ao soltar",
+      fld("input",{value:c.cmdRelease, placeholder:"opcional"},
+        function(e){ c.cmdRelease=e.target.value.trim(); }), can("trigger")));
+
+    var hint=el("div","cfgnote",
+      "Vazio manda <code>FUNCTION Cut Input="+(c.cam||"N")+"</code>. Escrevendo, manda exatamente o texto.<br>"+
+      "Exemplos: <code>FUNCTION Cut Input=3</code> · <code>FUNCTION Fade Input=2 Duration=500</code> · "+
+      "<code>FUNCTION OverlayInput1In Input=Lower Third</code>");
+    hint.style.margin="8px 0";
+    chPanel.appendChild(hint);
+
+    chPanel.appendChild(chRow("Threshold (dBFS)",
+      fld("input",{type:"number",value:P.threshold},function(e){ P.threshold=+e.target.value; refreshAutoPanel(); }),
+      can("trigger")));
+
+    // ---- lógica do canal (fader-start)
+    chPanel.appendChild(chSec("Lógica do canal","buses"));
+    chPanel.appendChild(chRow("Fader controla equipamento",
+      fld("input",{type:"checkbox",checked:c.logic},function(e){ c.logic=e.target.checked; }),
+      can("buses")));
+    chPanel.appendChild(chRow("Destino",
+      pick(TARGETS.map(function(t,i){ return {v:i,t:t.name+" ("+t.proto+" "+t.port+")"}; }),
+        c.logicTarget,function(v){ c.logicTarget=+v; }), can("buses")));
+    chPanel.appendChild(chRow("Ao abrir o fader",
+      fld("input",{value:c.onCmd,placeholder:"ex.: DECK1_PLAY"},
+        function(e){ c.onCmd=e.target.value.trim(); }), can("buses")));
+    chPanel.appendChild(chRow("Ao fechar o fader",
+      fld("input",{value:c.offCmd,placeholder:"ex.: DECK1_PAUSE"},
+        function(e){ c.offCmd=e.target.value.trim(); }), can("buses")));
+    var lhint=el("div","cfgnote",
+      "Dispara na <b>borda</b>: uma vez ao abrir, uma vez ao fechar — nunca repetido. "+
+      "Mute conta como fechar, para o deck não seguir tocando mudo.");
+    lhint.style.margin="8px 0";
+    chPanel.appendChild(lhint);
+
+    var lt=el("div","sbtn","TESTAR COMANDO DE ABERTURA");
+    lt.addEventListener("click",function(){
+      if(!c.onCmd){ addLog("rej","CH0"+c.id+"  sem comando de abertura"); return; }
+      sendReal(c.logicTarget, c.onCmd, "CH0"+c.id+"  [TESTE] ");
+    });
+    if(!can("buses")) lt.style.opacity=".45";
+    chPanel.appendChild(lt);
+
+    // ---- diagnóstico e validação
+    chPanel.appendChild(chSec("Validação","trigger"));
+
+    var diag=el("div","cfgnote","");
+    chPanel.appendChild(diag);
+
+    var brow=el("div",""); brow.style.display="flex"; brow.style.gap="8px"; brow.style.marginTop="10px";
+    var bt=el("div","sbtn hot","1 · DISPARAR TESTE");
+    bt.addEventListener("click",function(){ testFire(c); });
+    var bc=el("div","sbtn", c.cal.running ? "PARAR CALIBRAÇÃO" : "3 · CALIBRAR");
+    bc.addEventListener("click",function(){
+      if(c.cal.running){ c.cal.running=false; addLog("cut","CH0"+c.id+"  calibração encerrada"); }
+      else { c.cal={running:true,elapsed:0,floor:0,speech:-100,first:true};
+             addLog("cut","CH0"+c.id+"  calibrando: peça para a pessoa falar normalmente"); }
+      openChannel(c);
+    });
+    brow.appendChild(bt); brow.appendChild(bc);
+    if(!can("trigger")){ bt.style.opacity=".45"; bc.style.opacity=".45"; }
+    chPanel.appendChild(brow);
+
+    var apply=el("div","sbtn","APLICAR THRESHOLD SUGERIDO");
+    apply.style.marginTop="8px";
+    apply.addEventListener("click",function(){
+      if(!calReady(c)){ addLog("rej","calibração ainda sem material suficiente"); return; }
+      P.threshold=Math.round(calSuggestion(c));
+      refreshAutoPanel();
+      addLog("cut","CH0"+c.id+"  threshold ajustado para "+P.threshold+" dBFS pela calibração");
+      openChannel(c);
+    });
+    chPanel.appendChild(apply);
+
+    calUI={c:c, diag:diag};
+
+    // ---- destravar
+    var locked=["fonte","buses","dsp","trigger"].some(function(a){ return !can(a); });
+    if(locked){
+      var unlock=el("div","sbtn hot","ENTRAR COM OUTRO USUÁRIO");
+      unlock.style.marginTop="16px";
+      unlock.addEventListener("click",function(){
+        var n=prompt("Usuário:","tecnico"); if(!n) return;
+        var p=prompt("PIN:")||"";
+        if(login(n,p)) openChannel(c);
+        else addLog("rej","login recusado: "+n);
+      });
+      chPanel.appendChild(unlock);
+    }
+    chPanel.classList.add("open");
+    updateDiag();
+  }
+
+  /** Escreve o estado das três etapas de validação no painel aberto. */
+  function updateDiag(){
+    if(!calUI || !chPanel.classList.contains("open")) return;
+    var c=calUI.c, p=c.presence, cl=c.cal;
+    var sinal = p.silence<200 ? "<b style='color:#54d07f'>presente</b>"
+              : (p.ever && p.silence>3000 ? "<b style='color:#ffb020'>emudeceu há "
+                 +(p.silence/1000).toFixed(1)+" s</b>"
+                 : (p.ever?"em silêncio":"<b style='color:#ff6b6b'>nunca houve sinal</b>"));
+    var linhaCal = cl.running
+      ? "medindo há "+(cl.elapsed/1000).toFixed(1)+" s · ruído "+cl.floor.toFixed(1)
+        +" · fala "+cl.speech.toFixed(1)+" dB"
+        +(calReady(c)? " → sugerido <b style='color:#8fe3ff'>"+calSuggestion(c).toFixed(1)+" dBFS</b>"
+                     : " → ainda sem material")
+      : (cl.elapsed>0 ? "ruído "+cl.floor.toFixed(1)+" · fala "+cl.speech.toFixed(1)
+         +(calReady(c)? " → sugerido <b style='color:#8fe3ff'>"+calSuggestion(c).toFixed(1)+" dBFS</b>":" → incompleta")
+         : "não calibrado");
+    calUI.diag.innerHTML =
+      "<b>1 · comando</b> — dispara sem áudio e confirma que o vMix responde<br>"+
+      "<b>2 · sinal na entrada</b> — "+sinal+" · pico "+p.peak.toFixed(1)+" dBFS<br>"+
+      "<b>3 · calibração</b> — "+linhaCal+"<br>"+
+      "<span style='color:#6c757e'>threshold em vigor: "+P.threshold+" dBFS</span>";
+  }
+
+  // ---------------- painel de configurações ----------------
+  var CFG = {
+    driver:"ASIO", device:"(nenhum) — selecionar no app",
+    sampleRate:48000, buffer:128, inputs:16, outputs:8,
+    vmixHost:"127.0.0.1", vmixPort:8099, vmixProto:"TCP", vmixOn:true,
+    busPair:[0,1,2,3], cuePair:-1, masterDb:0,
+    monitorPair:-1, phonesPair:-1, studioPair:-1, ext1Pair:-1, ext2Pair:-1,
+    monitorSource:0, monitorDb:-18, phonesDb:-15, cueDb:-12, studioDb:-18,
+    dimDb:-12, cueToPhones:true,
+    meterMode:"PPM", trimRange:25, faderTop:10
+  };
+  var PAIRS=[{v:-1,t:"não roteado"},{v:0,t:"1/2"},{v:1,t:"3/4"},{v:2,t:"5/6"},{v:3,t:"7/8"}];
+  var IN_PAIRS=[{v:-1,t:"nenhuma"},{v:0,t:"1/2"},{v:1,t:"3/4"},{v:2,t:"5/6"},{v:3,t:"7/8"},
+                {v:4,t:"9/10"},{v:5,t:"11/12"},{v:6,t:"13/14"},{v:7,t:"15/16"}];
+  var MON_SRC=[{v:0,t:"PGM 1"},{v:1,t:"PGM 2"},{v:2,t:"PGM 3"},{v:3,t:"PGM 4"},
+               {v:4,t:"EXT 1"},{v:5,t:"EXT 2"}];
+  var SRC_TYPES=["Operador","Produtor","Convidado CR","Convidado Estúdio","Mic Externo",
+                 "Linha","Telefone","Codec","Player de PC","Feed de Estúdio"];
+  var NET_KINDS=["NDI","AES67","Local"];
+  // fontes que chegam pela rede, não pela placa
+  var NETSRC=[{kind:"NDI", name:"PC-CART (Player 1)", machine:"PC-CART", ch:2, audioOnly:true,
+               buffer:8, controlUrl:"http://192.168.1.40:9000/cart", startStop:true, state:"ok"},
+              {kind:"NDI", name:"PC-CART (Player 2)", machine:"PC-CART", ch:2, audioOnly:true,
+               buffer:8, controlUrl:"", startStop:false, state:"ok"}];
+  var NETCFG={machineName:"MESA-ESTUDIO-1", discovery:"", multicast:false};
+  // destinos de comando: cada um com protocolo, host e porta
+  var TARGETS=[{name:"vMix",        proto:"TCP", host:"127.0.0.1", port:8099, nl:true},
+               {name:"Cartucheira", proto:"UDP", host:"127.0.0.1", port:8889, nl:false}];
+  // envio real: o navegador nao fala UDP/TCP, entao usa a ponte local (relay.py)
+  var RELAY={enabled:false, url:"http://127.0.0.1:8890/send", sent:0, failed:0, pending:0};
+
+  function sendReal(targetIdx, text, tag){
+    var t=TARGETS[targetIdx]||TARGETS[0];
+    var rotulo=(tag||"")+t.proto+" "+t.host+":"+t.port+"  \u2192  "+text;
+    if(!RELAY.enabled){ addLog("fire",rotulo+"   (simulado)"); return; }
+    var q=RELAY.url+"?proto="+t.proto.toLowerCase()+"&host="+encodeURIComponent(t.host)+
+          "&port="+t.port+"&nl="+(t.nl?1:0)+"&text="+encodeURIComponent(text);
+    addLog("fire",rotulo);
+    RELAY.pending++;
+    fetch(q).then(function(r){ return r.json(); }).then(function(j){
+      RELAY.pending--; if(j.ok) RELAY.sent++; else RELAY.failed++;
+      if(!j.ok) addLog("rej","   ponte: "+(j.info||"falhou"));
+    }).catch(function(){
+      RELAY.pending--; RELAY.failed++;
+      addLog("rej","   ponte nao respondeu \u2014 o relay.py esta rodando?");
+    });
+  }
+
+  // perfis de acesso: o que cada um pode mexer no menu do canal
+  var PROFILES={
+    "Operador":  {fonte:false, ganho:true,  buses:false, dsp:false, trigger:false},
+    "Produtor":  {fonte:true,  ganho:true,  buses:true,  dsp:false, trigger:true},
+    "Engenheiro":{fonte:true,  ganho:true,  buses:true,  dsp:true,  trigger:true}
+  };
+  var USERS=[{name:"operador", profile:"Operador",   pin:"",     enabled:true},
+             {name:"tecnico",  profile:"Engenheiro", pin:"1234", enabled:true}];
+  var PROFILE="Operador", CURRENT_USER="", REQUIRE_LOGIN=false;
+  function can(area){ return PROFILES[PROFILE] ? PROFILES[PROFILE][area] : false; }
+  function login(name,pin){
+    var u=USERS.filter(function(x){ return x.name===name; })[0];
+    if(!u || !u.enabled) return false;
+    if(u.pin && u.pin!==pin) return false;
+    CURRENT_USER=u.name; PROFILE=u.profile;
+    addLog("cut","LOGIN: "+u.name+" ("+u.profile+")");
+    return true;
+  }
+  function logout(){
+    addLog("cut","LOGOUT: "+(CURRENT_USER||"—"));
+    CURRENT_USER=""; PROFILE="Operador";
+  }
+
+  var cfg=el("div","cfg");
+  var cfgWrap=el("div","cfgwrap");
+  var cfgTabs=el("div","cfgtabs");
+  var cfgBody=el("div","cfgbody");
+  cfgWrap.appendChild(cfgTabs); cfgWrap.appendChild(cfgBody);
+  cfg.appendChild(cfgWrap);
+  var cfgClose=el("div","cfgclose","\u2715");
+  cfgClose.addEventListener("click",function(){ cfg.classList.remove("open"); });
+  cfg.appendChild(cfgClose);
+  cfg.addEventListener("click",function(e){ if(e.target===cfg) cfg.classList.remove("open"); });
+  document.body.appendChild(cfg);
+
+  function fld(tag,attrs,onch){
+    var e=document.createElement(tag);
+    Object.keys(attrs||{}).forEach(function(k){ e[k]=attrs[k]; });
+    if(onch) e.addEventListener("change",onch);
+    return e;
+  }
+  function pick(options,value,onch){
+    var sl=document.createElement("select");
+    options.forEach(function(o){
+      var op=document.createElement("option");
+      op.value=(o.v!==undefined?o.v:o); op.textContent=(o.t!==undefined?o.t:o);
+      sl.appendChild(op);
+    });
+    sl.value=String(value);
+    sl.addEventListener("change",function(){ onch(sl.value); });
+    return sl;
+  }
+  function row(label,ctrl){
+    var r=el("div","cfgrow"); r.appendChild(el("div","cfglbl",label)); r.appendChild(ctrl); return r;
+  }
+  function note(txt){ return el("div","cfgnote",txt); }
+
+  var TABS={
+    "Áudio": function(b){
+      b.appendChild(el("h4","","Dispositivo de áudio"));
+      b.appendChild(el("p","hint","O driver é aberto pelo aplicativo. Aqui ficam os valores que a mesa envia para ele."));
+      b.appendChild(row("Tipo de driver", pick(["ASIO","WASAPI","AES67 / Livewire+"],CFG.driver,function(v){CFG.driver=v;})));
+      b.appendChild(row("Dispositivo", fld("input",{value:CFG.device},function(e){CFG.device=e.target.value;})));
+      b.appendChild(row("Sample rate", pick([44100,48000,96000],CFG.sampleRate,function(v){CFG.sampleRate=+v;render();})));
+      b.appendChild(row("Buffer (samples)", pick([64,128,256,512,1024],CFG.buffer,function(v){CFG.buffer=+v;render();})));
+      b.appendChild(row("Entradas / saídas",
+        fld("input",{value:CFG.inputs+" x "+CFG.outputs, disabled:true})));
+      var ms=(CFG.buffer/CFG.sampleRate*1000);
+      b.appendChild(note("Latência de um bloco: "+ms.toFixed(2)+" ms. Ida e volta pelo driver fica"+
+        " aproximadamente em "+(ms*2).toFixed(2)+" ms, mais o que a placa acrescenta. "+
+        "Plugin com lookahead soma por cima disso."));
+    },
+
+    "Fontes": function(b){
+      b.appendChild(el("h4","","Perfis de fonte"));
+      b.appendChild(el("p","hint","A lógica segue a fonte: tipo, câmera e threshold viajam com ela para qualquer fader."));
+      var t=document.createElement("table"); t.className="cfgtable";
+      t.innerHTML="<tr><th>#</th><th>Nome</th><th>Tipo</th><th>Origem</th><th>Entrada</th>"+
+                  "<th>Trim</th><th>Trigger</th><th>Thr dB</th><th>Câmera</th><th>Comando</th></tr>";
+      chans.forEach(function(c,i){
+        var tr=document.createElement("tr");
+        function td(node){ var d=document.createElement("td"); d.appendChild(node); tr.appendChild(d); return d; }
+        var n=document.createElement("td"); n.textContent=(i<faderCount?"A":"B")+((i%faderCount)+1);
+        tr.appendChild(n);
+        td(fld("input",{value:c.src},function(e){ c.src=e.target.value; build(faderCount); }));
+        td(pick(SRC_TYPES, SRC_TYPES[c.type||0], function(v){ c.type=SRC_TYPES.indexOf(v); }));
+        var entrada=document.createElement("td");
+        function drawEntrada(){
+          entrada.innerHTML="";
+          if(c.netIdx>=0){
+            entrada.appendChild(pick(NETSRC.map(function(n,j){ return {v:j,t:n.name}; }),
+              c.netIdx, function(v){ c.netIdx=+v; }));
+          } else {
+            entrada.appendChild(fld("input",{type:"number",value:i+1},function(){}));
+          }
+        }
+        td(pick([{v:"placa",t:"Placa"},{v:"rede",t:"Rede"}], c.netIdx>=0?"rede":"placa",
+          function(v){ c.netIdx = (v==="rede") ? 0 : -1; drawEntrada(); }));
+        tr.appendChild(entrada); drawEntrada();
+        td(fld("input",{type:"number",step:"0.5",value:c.trim.toFixed(1)},function(e){ c.trim=+e.target.value; }));
+        td(fld("input",{type:"checkbox",checked:!!c.cam},function(e){ c.cam=e.target.checked?(i+1):0; }));
+        td(fld("input",{type:"number",value:P.threshold},function(e){ P.threshold=+e.target.value; refreshAutoPanel(); }));
+        td(fld("input",{type:"number",value:c.cam||0},function(e){ c.cam=+e.target.value; }));
+        td(fld("input",{value:c.cmd,placeholder:"CUT pela câmera"},
+          function(e){ c.cmd=e.target.value.trim(); }));
+        t.appendChild(tr);
+      });
+      b.appendChild(t);
+    },
+
+    "Saídas": function(b){
+      b.appendChild(el("h4","","Roteamento de saídas"));
+      b.appendChild(el("p","hint","Cada bus vai para um par de saídas do dispositivo. -1 desliga o bus."));
+      [1,2,3,4].forEach(function(k){
+        b.appendChild(row("PGM "+k+" \u2192 par",
+          pick(PAIRS, CFG.busPair[k-1], function(v){ CFG.busPair[k-1]=+v; })));
+      });
+      b.appendChild(row("CUE \u2192 par", pick(PAIRS,CFG.cuePair,function(v){ CFG.cuePair=+v; })));
+      b.appendChild(row("MONITOR CR \u2192 par", pick(PAIRS,CFG.monitorPair,function(v){ CFG.monitorPair=+v; })));
+      b.appendChild(row("FONE \u2192 par",       pick(PAIRS,CFG.phonesPair, function(v){ CFG.phonesPair=+v; })));
+      b.appendChild(row("ESTÚDIO \u2192 par",    pick(PAIRS,CFG.studioPair, function(v){ CFG.studioPair=+v; })));
+      b.appendChild(row("Ganho do master (dB)",
+        fld("input",{type:"number",step:"0.5",value:CFG.masterDb},function(e){ CFG.masterDb=+e.target.value; })));
+      b.appendChild(note("Mix-minus ainda não está aqui: cada fader com fonte de telefone ou codec "+
+        "vai precisar do seu próprio backfeed, e isso muda o desenho dos buses."));
+    },
+
+    "Monitoração": function(b){
+      b.appendChild(el("h4","","Monitor, fone e CUE"));
+      b.appendChild(el("p","hint","Os mutes não são manuais: seguem o tipo de fonte. Microfone do "+
+        "controle aberto silencia o monitor CR — é o que evita microfonia."));
+      b.appendChild(row("Fonte padrão do monitor",
+        pick(MON_SRC,CFG.monitorSource,function(v){ CFG.monitorSource=+v; })));
+      [["Nível do monitor (dB)","monitorDb"],["Nível do fone (dB)","phonesDb"],
+       ["Nível do CUE (dB)","cueDb"],["Nível do estúdio (dB)","studioDb"],
+       ["Dim do talkback (dB)","dimDb"]].forEach(function(f){
+        b.appendChild(row(f[0], fld("input",{type:"number",step:"0.5",value:CFG[f[1]]},
+          function(e){ CFG[f[1]]=+e.target.value; })));
+      });
+      b.appendChild(row("CUE sobrepõe o fone",
+        fld("input",{type:"checkbox",checked:CFG.cueToPhones},function(e){ CFG.cueToPhones=e.target.checked; })));
+      b.appendChild(el("h4","","Entradas externas"));
+      b.appendChild(el("p","hint","Fontes fora do estúdio — normalmente receptor de ar e retorno."));
+      b.appendChild(row("EXT 1 \u2190 par de entrada",
+        pick(IN_PAIRS,CFG.ext1Pair,function(v){ CFG.ext1Pair=+v; })));
+      b.appendChild(row("EXT 2 \u2190 par de entrada",
+        pick(IN_PAIRS,CFG.ext2Pair,function(v){ CFG.ext2Pair=+v; })));
+      b.appendChild(note("CUE é PFL: ouve a fonte antes do fader e independe do ON/OFF. "+
+        "Por isso ele serve para conferir um microfone sem colocá-lo no ar."));
+    },
+
+    "Rede (NDI)": function(b){
+      b.appendChild(el("h4","","Fontes de rede"));
+      b.appendChild(el("p","hint","Áudio vindo de outra máquina — cartucheira, playout, remota. "+
+        "Cada fonte tem fila própria; se a rede engasgar, sai silêncio e o canal acende alerta."));
+
+      var t=document.createElement("table"); t.className="cfgtable";
+      t.innerHTML="<tr><th>Tipo</th><th>Emissor</th><th>Ch</th><th>Fila</th>"+
+                  "<th>Só áudio</th><th>Start/Stop</th><th>URL de controle</th><th></th></tr>";
+      NETSRC.forEach(function(nsrc,i){
+        var tr=document.createElement("tr");
+        function td(node){ var d=document.createElement("td"); d.appendChild(node); tr.appendChild(d); }
+        td(pick(NET_KINDS,nsrc.kind,function(v){ nsrc.kind=v; }));
+        td(fld("input",{value:nsrc.name},function(e){ nsrc.name=e.target.value; }));
+        td(fld("input",{type:"number",value:nsrc.ch},function(e){ nsrc.ch=+e.target.value; }));
+        td(pick([4,8,12,16],nsrc.buffer,function(v){ nsrc.buffer=+v; }));
+        td(fld("input",{type:"checkbox",checked:nsrc.audioOnly},function(e){ nsrc.audioOnly=e.target.checked; }));
+        td(fld("input",{type:"checkbox",checked:nsrc.startStop},function(e){ nsrc.startStop=e.target.checked; }));
+        td(fld("input",{value:nsrc.controlUrl},function(e){ nsrc.controlUrl=e.target.value; }));
+        var rm=el("div","sbtn","\u2715");
+        rm.addEventListener("click",function(){ NETSRC.splice(i,1); render(); });
+        td(rm);
+        t.appendChild(tr);
+      });
+      b.appendChild(t);
+
+      var add=el("div","sbtn hot","+ ADICIONAR FONTE");
+      add.style.marginTop="12px";
+      add.addEventListener("click",function(){
+        NETSRC.push({kind:"NDI",name:"NOVA FONTE",machine:"",ch:2,audioOnly:true,
+                     buffer:8,controlUrl:"",startStop:false,state:"ok"});
+        render();
+      });
+      b.appendChild(add);
+
+      b.appendChild(el("h4","","Descoberta"));
+      b.appendChild(row("Nome desta máquina na rede",
+        fld("input",{value:NETCFG.machineName},function(e){ NETCFG.machineName=e.target.value; })));
+      b.appendChild(row("Servidor de descoberta",
+        fld("input",{value:NETCFG.discovery,placeholder:"vazio = mesma sub-rede (mDNS)"},
+          function(e){ NETCFG.discovery=e.target.value; })));
+      b.appendChild(row("Preferir multicast",
+        fld("input",{type:"checkbox",checked:NETCFG.multicast},function(e){ NETCFG.multicast=e.target.checked; })));
+
+      b.appendChild(note("A descoberta do NDI usa mDNS e não atravessa roteador sozinha: "+
+        "máquinas em sub-redes diferentes precisam do servidor de descoberta. "+
+        "Fila maior aguenta mais jitter e custa mais latência — 8 blocos é um começo razoável."));
+      b.appendChild(note("Evite que a cartucheira entregue o mesmo áudio à mesa e ao vMix ao mesmo "+
+        "tempo: são dois caminhos com atrasos diferentes. O certo é ela entrar só aqui, e o vMix "+
+        "receber o PGM da mesa."));
+    },
+
+    "Automação": function(b){
+      b.appendChild(el("h4","","Destinos de comando"));
+      b.appendChild(el("p","hint","A mesa não presume vMix: cada destino tem protocolo, host e porta."));
+      var tt=document.createElement("table"); tt.className="cfgtable";
+      tt.innerHTML="<tr><th>Nome</th><th>Protocolo</th><th>Host</th><th>Porta</th><th>Fim de linha</th><th></th></tr>";
+      TARGETS.forEach(function(t,i){
+        var tr=document.createElement("tr");
+        function td(node){ var d=document.createElement("td"); d.appendChild(node); tr.appendChild(d); }
+        td(fld("input",{value:t.name},function(e){ t.name=e.target.value; }));
+        td(pick(["TCP","UDP","HTTP"],t.proto,function(v){ t.proto=v; }));
+        td(fld("input",{value:t.host},function(e){ t.host=e.target.value; }));
+        td(fld("input",{type:"number",value:t.port},function(e){ t.port=+e.target.value; }));
+        td(fld("input",{type:"checkbox",checked:t.nl},function(e){ t.nl=e.target.checked; }));
+        var rm=el("div","sbtn","\u2715");
+        rm.addEventListener("click",function(){ if(TARGETS.length>1){ TARGETS.splice(i,1); render(); } });
+        td(rm);
+        tt.appendChild(tr);
+      });
+      b.appendChild(tt);
+      var addt=el("div","sbtn hot","+ ADICIONAR DESTINO"); addt.style.marginTop="10px";
+      addt.addEventListener("click",function(){
+        TARGETS.push({name:"NOVO",proto:"UDP",host:"127.0.0.1",port:9000,nl:false}); render();
+      });
+      b.appendChild(addt);
+      b.appendChild(row("Enviar de verdade (via ponte local)",
+        fld("input",{type:"checkbox",checked:RELAY.enabled},function(e){ RELAY.enabled=e.target.checked; })));
+      b.appendChild(row("Endereço da ponte",
+        fld("input",{value:RELAY.url},function(e){ RELAY.url=e.target.value.trim(); })));
+      var pt2=el("div","sbtn hot","TESTAR A PONTE AGORA");
+      pt2.addEventListener("click",function(){
+        var i=TARGETS.length>1?1:0, t=TARGETS[i];
+        var saved=RELAY.enabled; RELAY.enabled=true;
+        sendReal(i, t.proto==="UDP"?"DECK1_PLAY":"FUNCTION Cut Input=1", "[PONTE] ");
+        RELAY.enabled=saved;
+      });
+      b.appendChild(row("Diagnóstico", pt2));
+      b.appendChild(note("O navegador não consegue mandar UDP nem TCP. Rode <code>python relay.py</code> "+
+        "na mesma máquina e marque a opção acima — os botões de teste passam a enviar de verdade. "+
+        "A ponte é ferramenta de bancada: no produto o próprio motor abre o socket."));
+
+      b.appendChild(note("UDP é dispara-e-esquece: não há confirmação de entrega. "+
+        "Por isso o botão de teste importa — ele é a única forma de saber que chegou."));
+
+      b.appendChild(el("h4","","vMix e trigger"));
+      b.appendChild(el("p","hint","A API TCP é mais rápida e previsível que a HTTP para corte ao vivo."));
+      b.appendChild(row("Enviar comandos ao vMix",
+        fld("input",{type:"checkbox",checked:CFG.vmixOn},function(e){ CFG.vmixOn=e.target.checked; })));
+      b.appendChild(row("Protocolo", pick(["TCP","HTTP"],CFG.vmixProto,function(v){
+        CFG.vmixProto=v; CFG.vmixPort = v==="TCP"?8099:8088; render(); })));
+      b.appendChild(row("Host", fld("input",{value:CFG.vmixHost},function(e){ CFG.vmixHost=e.target.value; })));
+      b.appendChild(row("Porta", fld("input",{type:"number",value:CFG.vmixPort},function(e){ CFG.vmixPort=+e.target.value; })));
+
+      var P_FIELDS=[["Threshold (dBFS)","threshold",1],["Trigger time (ms)","triggerTime",10],
+                    ["Hold (ms)","hold",50],["Release (ms)","release",50],
+                    ["Cooldown (ms)","cooldown",50],["Histerese (dB)","hysteresis",1],
+                    ["Plano mínimo (ms)","minShot",100],["Dominância (dB)","dominance",1],
+                    ["Câmera geral","wideCam",1]];
+      P_FIELDS.forEach(function(f){
+        b.appendChild(row(f[0], fld("input",{type:"number",step:f[2],value:P[f[1]]},function(e){
+          P[f[1]]=+e.target.value; refreshAutoPanel();
+        })));
+      });
+      b.appendChild(note("Cooldown e plano mínimo são globais. Cooldown por canal não impede "+
+        "ping-pong entre dois canais — cada um respeita o seu e o corte continua picotando."));
+    },
+
+    "DSP": function(b){
+      b.appendChild(el("h4","","Cadeia de processamento"));
+      b.appendChild(el("p","hint","Ordem configurável por canal. VST3 é hospedado por abstração de plugin."));
+      ["Auto Trim (estrutural)","EQ paramétrico","Compressor","Gate / Expander","De-esser","Limiter"]
+        .forEach(function(n,i){
+          b.appendChild(row(n, fld("input",{type:"checkbox",checked:i<2},function(){})));
+        });
+      b.appendChild(row("Pasta de plugins VST3", fld("input",{value:"C:\\Program Files\\Common Files\\VST3"},function(){})));
+      b.appendChild(note("Scan de VST3 roda em processo separado: um plugin que trava não pode "+
+        "derrubar o console no ar. Nada disso está implementado ainda — a tela existe para "+
+        "fechar o formato de configuração."));
+    },
+
+    "Usuários": function(b){
+      b.appendChild(el("h4","","Quem está operando"));
+      var st=el("div","cfgnote", CURRENT_USER
+        ? "Logado como <b>"+CURRENT_USER+"</b> · perfil "+PROFILE
+        : "Ninguém logado · usando o perfil "+PROFILE);
+      b.appendChild(st);
+
+      var lin=el("div","sbtn hot","ENTRAR"); lin.style.marginTop="10px";
+      lin.addEventListener("click",function(){
+        var n=prompt("Usuário:","tecnico"); if(!n) return;
+        var p=prompt("PIN:")||"";
+        if(!login(n,p)) addLog("rej","login recusado: "+n);
+        render();
+      });
+      var lout=el("div","sbtn","SAIR");
+      lout.addEventListener("click",function(){ logout(); render(); });
+      var lrow=el("div","cfgrow");
+      lrow.appendChild(el("div","cfglbl","Sessão"));
+      var box=el("div",""); box.style.display="flex"; box.style.gap="8px";
+      box.appendChild(lin); box.appendChild(lout);
+      lrow.appendChild(box); b.appendChild(lrow);
+      b.appendChild(row("Exigir login para operar",
+        fld("input",{type:"checkbox",checked:REQUIRE_LOGIN},function(e){ REQUIRE_LOGIN=e.target.checked; })));
+
+      b.appendChild(el("h4","","Usuários"));
+      var t=document.createElement("table"); t.className="cfgtable";
+      t.innerHTML="<tr><th>Nome</th><th>Perfil</th><th>PIN</th><th>Ativo</th><th></th></tr>";
+      USERS.forEach(function(u,i){
+        var tr=document.createElement("tr");
+        function td(node){ var d=document.createElement("td"); d.appendChild(node); tr.appendChild(d); }
+        td(fld("input",{value:u.name},function(e){ u.name=e.target.value; }));
+        td(pick(Object.keys(PROFILES),u.profile,function(v){ u.profile=v;
+          if(CURRENT_USER===u.name){ PROFILE=v; } render(); }));
+        td(fld("input",{value:u.pin,placeholder:"sem PIN"},function(e){ u.pin=e.target.value; }));
+        td(fld("input",{type:"checkbox",checked:u.enabled},function(e){ u.enabled=e.target.checked; }));
+        var rm=el("div","sbtn","\u2715");
+        rm.addEventListener("click",function(){
+          if(USERS.length<=1){ addLog("rej","não é possível ficar sem nenhum usuário"); return; }
+          if(CURRENT_USER===u.name) logout();
+          USERS.splice(i,1); render();
+        });
+        td(rm);
+        t.appendChild(tr);
+      });
+      b.appendChild(t);
+
+      var add=el("div","sbtn hot","+ CRIAR USUÁRIO"); add.style.marginTop="12px";
+      add.addEventListener("click",function(){
+        var n=prompt("Nome do usuário:"); if(!n) return;
+        if(USERS.some(function(x){ return x.name===n; })){ addLog("rej","usuário já existe"); return; }
+        USERS.push({name:n,profile:"Operador",pin:"",enabled:true}); render();
+      });
+      b.appendChild(add);
+
+      b.appendChild(el("h4","","Permissões por perfil"));
+      var pt=document.createElement("table"); pt.className="cfgtable";
+      pt.innerHTML="<tr><th>Perfil</th><th>Fonte</th><th>Ganho</th><th>Buses</th>"+
+                   "<th>DSP</th><th>Câmera</th></tr>";
+      Object.keys(PROFILES).forEach(function(pn){
+        var tr=document.createElement("tr");
+        var nd=document.createElement("td"); nd.textContent=pn; tr.appendChild(nd);
+        ["fonte","ganho","buses","dsp","trigger"].forEach(function(area){
+          var d=document.createElement("td");
+          var cb=document.createElement("input"); cb.type="checkbox";
+          cb.checked=PROFILES[pn][area];
+          cb.addEventListener("change",function(){ PROFILES[pn][area]=cb.checked; });
+          d.appendChild(cb); tr.appendChild(d);
+        });
+        pt.appendChild(tr);
+      });
+      b.appendChild(pt);
+
+      b.appendChild(note("O PIN aqui é de operação, não de segurança: evita engano, "+
+        "não resiste a quem tem acesso ao arquivo de configuração."));
+    },
+
+    "Sistema": function(b){
+      b.appendChild(el("h4","","Superfície e arquivos"));
+      b.appendChild(row("Faders por layer",
+        pick([8,12,16],faderCount,function(v){ build(+v); render(); })));
+      b.appendChild(row("Layers", fld("input",{value:LAYERS,disabled:true})));
+      b.appendChild(row("Escala", pick([{v:"auto",t:"caber na tela"},{v:"width",t:"preencher largura"},
+        {v:"1",t:"100%"},{v:"1.25",t:"125%"},{v:"1.5",t:"150%"}],zoomMode,function(v){
+        zoomMode=v; applyZoom(); })));
+      b.appendChild(row("Perfil em vigor",
+        fld("input",{value:(CURRENT_USER?CURRENT_USER+" · ":"")+PROFILE,disabled:true},null)));
+      b.appendChild(note("Perfil vem do usuário logado — administre na aba Usuários. "+
+        "O menu do canal (tecla SOFT) respeita esse perfil."));
+      b.appendChild(row("Modo de medidor",
+        pick(["PPM","VU"],CFG.meterMode,function(v){ CFG.meterMode=v; })));
+      b.appendChild(row("Faixa de trim (± dB)",
+        fld("input",{type:"number",value:CFG.trimRange},function(e){ CFG.trimRange=+e.target.value; })));
+      b.appendChild(row("Topo do fader (dB)",
+        fld("input",{type:"number",value:CFG.faderTop},function(e){ CFG.faderTop=+e.target.value; })));
+      var b1=el("div","sbtn","LIMPAR LOG");
+      b1.addEventListener("click",function(){ log.length=0; addLog("cut","log limpo"); });
+      b.appendChild(row("Log de automação",b1));
+      b.appendChild(note("Cenas ficam em arquivo próprio (.cena.json). As configurações desta "+
+        "janela pertencem à instalação, não à cena — trocar de show não muda dispositivo nem vMix."));
+    }
+  };
+
+  var cfgTab="Áudio";
+  cfgTabs.appendChild(el("h3","","Configurações"));
+  Object.keys(TABS).forEach(function(name){
+    var t=el("div","cfgtab"+(name===cfgTab?" act":""),name);
+    t.setAttribute("tabindex","0");
+    t.addEventListener("click",function(){
+      cfgTab=name;
+      cfgTabs.querySelectorAll(".cfgtab").forEach(function(x){ x.classList.toggle("act",x.textContent===name); });
+      render();
+    });
+    cfgTabs.appendChild(t);
+  });
+  function render(){ cfgBody.innerHTML=""; TABS[cfgTab](cfgBody); }
+  render();
+
+  bar.appendChild(sbtn("CONFIG \u2699",function(){
+    cfg.classList.add("open"); menuPanel.classList.remove("open"); render();
+  }));
+
+  var menuPanel=el("div","menu");
+  menuPanel.appendChild(el("h3","","Cenas e ajustes"));
+  menuPanel.appendChild(bar);
+  document.body.appendChild(menuPanel);
+
+  var menuBtn=el("div","menubtn","\u2630  MENU");
+  menuBtn.setAttribute("tabindex","0");
+  menuBtn.addEventListener("click",function(e){
+    e.stopPropagation(); menuPanel.classList.toggle("open");
+  });
+  document.querySelector(".topbar").appendChild(menuBtn);
+  document.addEventListener("click",function(e){
+    if(menuPanel.classList.contains("open") && !menuPanel.contains(e.target) && e.target!==menuBtn)
+      menuPanel.classList.remove("open");
+  });
+
+  build(8);
+
+  // cenas de fábrica
+  scenes["PADRÃO"]=captureScene("PADRÃO");
+  (function(){
+    var podcast=captureScene("PODCAST");
+    podcast.channels.forEach(function(c,i){ c.on=i<4; c.fader=i<4?0.78:0.5; });
+    podcast.trigger.thresholdDb=-34; podcast.trigger.holdMs=1000;
+    scenes["PODCAST"]=podcast;
+    var ao=captureScene("AO VIVO · SEM AUTOMAÇÃO");
+    ao.automation.enabled=false;
+    scenes["AO VIVO · SEM AUTOMAÇÃO"]=ao;
+  })();
+  refreshSceneList("PADRÃO");
+
+  // ---------- meter bridge ----------
+  [["bridgeA",["PGM 1","PGM 2"]],["bridgeB",["PGM 3","PGM 4"]]].forEach(function(spec){
+    var box=document.getElementById(spec[0]);
+    spec[1].forEach(function(n){
+      var row=el("div","bmrow");
+      row.appendChild(el("b","",n));
+      var tk=el("div","track"); var f=el("div","fill"); var sg=el("div","seg");
+      tk.appendChild(f); tk.appendChild(sg); row.appendChild(tk);
+      row.appendChild(el("i","","-∞"));
+      box.appendChild(row);
+      bridgeMeters.push({fill:f,val:row.querySelector("i")});
+    });
+  });
+
+  // ---------- simulação de áudio ----------
+  function simulate(dt){
+    var anySpeaking=false;
+    chans.forEach(function(c){
+      c.nextFlip-=dt;
+      if(c.nextFlip<=0){
+        if(c.id<=TRIG_CH){ c.speaking=!c.speaking;
+          c.nextFlip = c.speaking ? 900+Math.random()*2600 : 600+Math.random()*3200; }
+        else { c.speaking=false; c.nextFlip=2000; }
+      }
+      if(c.speaking) anySpeaking=true;
+    });
+    chans.forEach(function(c){
+      var target;
+      if(c.id>TRIG_CH){ target = c.on ? -24+Math.random()*6 : -70; }
+      else if(c.speaking){ target = -26 + Math.random()*11; }
+      else if(anySpeaking){ target = -44 + Math.random()*7; }   // vazamento entre microfones
+      else { target = -60 + Math.random()*5; }
+      var k = target>c.level ? 0.45 : 0.16;                     // balística: ataque rápido, release lento
+      c.level += (target-c.level)*k;
+      c.peak = Math.max(c.level, c.peak-dt*0.05);
+    });
+  }
+
+  function dominant(c){
+    if(!auto.dominance) return true;
+    for(var i=0;i<TRIG_CH;i++){
+      var o=chans[i]; if(o===c) continue;
+      if(o.level > c.level - P.dominance && o.level > P.threshold) {
+        if(o.level > c.level) return false;
+      }
+    }
+    return true;
+  }
+
+  function requestCut(c){
+    if(!auto.enabled) { addLog("rej","CH0"+c.id+"  trigger ignorado · automação geral OFF"); return; }
+    if(now()-auto.lastCut < P.minShot){
+      addLog("rej","CH0"+c.id+"  corte ignorado · plano mínimo ("+Math.round(now()-auto.lastCut)+
+        "ms de "+P.minShot+"ms)"); return;
+    }
+    auto.lastCut=now(); auto.holdUntil=now()+P.hold;
+    if(auto.test){ addLog("fire","CH0"+c.id+"  [TESTE] ENVIARIA → "+cmdOf(c)); return; }
+    auto.live=c.cam;
+    addLog("cut","CH0"+c.id+"  "+cmdOf(c)+"   nível "+c.level.toFixed(1)+" dBFS");
+  }
+
+  function triggerFSM(c,dt){
+    if(c.id>TRIG_CH) return;
+    var thrOn=P.threshold, thrOff=P.threshold-P.hysteresis;
+    switch(c.st){
+      case "IDLE":
+        if(c.level>thrOn && dominant(c)){ c.st="CANDIDATE"; c.tState=0; }
+        break;
+      case "CANDIDATE":
+        c.tState+=dt;
+        if(c.level<thrOn){
+          addLog("rej","CH0"+c.id+"  descartado · "+Math.round(c.tState)+"ms de "+P.triggerTime+"ms exigidos");
+          c.st="IDLE"; c.tState=0;
+        } else if(c.tState>=P.triggerTime){
+          addLog("fire","CH0"+c.id+"  TRIGGER FIRED  ("+c.level.toFixed(1)+" dBFS)");
+          requestCut(c); c.st="ACTIVE"; c.belowT=0;
+        }
+        break;
+      case "ACTIVE":
+        if(c.level<thrOff){
+          c.belowT+=dt;
+          if(c.belowT>=P.release){
+            c.st="COOLDOWN"; c.tState=P.cooldown;
+            if(c.cmdRelease && auto.enabled && !auto.test)
+              sendReal(c.cmdTarget, c.cmdRelease, "CH0"+c.id+"  [soltou]  ");
+          }
+        }
+        else c.belowT=0;
+        break;
+      case "COOLDOWN":
+        c.tState-=dt; if(c.tState<=0){ c.st="IDLE"; c.tState=0; }
+        break;
+    }
+  }
+
+  function fallbackWide(){
+    if(!auto.enabled||auto.test) return;
+    var active=false;
+    for(var i=0;i<TRIG_CH;i++) if(chans[i].st==="ACTIVE"||chans[i].st==="CANDIDATE") active=true;
+    if(!active && now()>auto.holdUntil && auto.live!==P.wideCam && now()-auto.lastCut>=P.minShot){
+      auto.live=P.wideCam; auto.lastCut=now();
+      sendReal(0, "FUNCTION Cut Input="+P.wideCam, "—  [geral, ninguém falando]  ");
+    }
+  }
+
+  // ---------- render ----------
+  var last=performance.now(), timer0=performance.now();
+  function frame(t){
+    var dt=Math.min(60,t-last); last=t; auto.t+=dt;
+    simulate(dt);
+    chans.forEach(function(c){
+      triggerFSM(c,dt);
+
+      // presença de sinal: não depende do trigger nem do fader
+      var p=c.presence;
+      if(c.level > -50){ p.silence=0; p.ever=true; } else { p.silence+=dt; }
+      if(c.level > p.peak) p.peak=c.level;
+
+      // calibrador: piso de ruído desce rápido e sobe devagar; fala, o contrário
+      var cl=c.cal;
+      if(cl.running){
+        cl.elapsed+=dt;
+        if(cl.first){ cl.floor=c.level; cl.speech=c.level; cl.first=false; }
+        if(c.level<cl.floor) cl.floor=c.level; else cl.floor += 0.00002*dt*(c.level-cl.floor);
+        if(c.level>cl.speech) cl.speech=c.level; else cl.speech += 0.00001*dt*(c.level-cl.speech);
+      }
+    });
+    fallbackWide();
+
+    var busSum={1:-70,2:-70,3:-70,4:-70};
+    chans.forEach(function(c){
+      // fader-start: comando só na borda
+      var openNow = c.on && !c.muted;
+      if(c.logic && openNow!==c._prevOn){
+        c._prevOn=openNow;
+        var txt = openNow ? c.onCmd : c.offCmd;
+        if(txt) sendReal(c.logicTarget, txt, "CH0"+c.id+"  ");
+      } else if(c._prevOn===undefined){ c._prevOn=openNow; }
+
+      var post = c.on ? c.level + c.trim + Math.min(10,faderDb(c.fader)) : -70;
+      for(var b=1;b<=4;b++) if(c.buses[b] && c.on) busSum[b]=Math.max(busSum[b],post);
+
+      var r=c.ui;
+      if(!r) return;                       // canal do outro layer: continua no mix, sem strip
+      r.cap.style.bottom = "calc("+(c.fader*100)+"% - "+(c.fader*36)+"px + 12px)";
+      r.fdb.textContent = c.fader<=0.005 ? "-∞" : (faderDb(c.fader)>=0?"+":"")+faderDb(c.fader).toFixed(1);
+      r.mIn.f.style.width   = dbToPct(c.level)+"%";              // pré-trim: fonte do trigger
+      r.mTrim.f.style.width = dbToPct(c.level + c.trim)+"%";     // pós-trim, antes do fader
+      r.mIn.mark.style.left = dbToPct(P.threshold)+"%";
+      r.pname.textContent = "TRIM " + (c.trim>=0?"+":"") + c.trim.toFixed(1);
+      r.trimv.textContent = c.pan===0 ? "C" : (c.pan<0?"E":"D") + Math.abs(Math.round(c.pan));
+      r.lamp.className="lamp"+(c.st==="CANDIDATE"?" cand":c.st==="ACTIVE"?" act":c.st==="COOLDOWN"?" cool":"");
+      r.siglamp.className="lamp sig"+(c.presence.silence<200?" ok":
+        (c.presence.ever && c.presence.silence>3000?" alarm":""));
+      r.tlbl.textContent = c.id>TRIG_CH ? "—" : c.st+(c.st==="CANDIDATE"?" "+Math.round(c.tState)+"ms":"");
+      if(c.cam) r.cam.textContent="CAM "+c.cam+" · "+(auto.enabled?"AUTO":"MANUAL");
+    });
+
+    bridgeMeters.forEach(function(m,i){
+      var v=busSum[i+1];
+      m.fill.style.width=dbToPct(v)+"%";
+      m.val.textContent=fmt(v);
+    });
+
+    updateDiag();
+    sendBox.innerHTML =
+      '<div class="autoline"><b>PONTE</b><i>'+(RELAY.enabled?"ligada":"desligada (simulando)")+'</i></div>'+
+      '<div class="autoline"><b>ENVIADOS</b><i>'+RELAY.sent+'</i></div>'+
+      '<div class="autoline"><b>FALHAS</b><i>'+RELAY.failed+'</i></div>'+
+      '<div class="autoline"><b>NA FILA</b><i>'+RELAY.pending+'</i></div>';
+    live.textContent="CAM "+auto.live;
+    live.className="oled live"+(auto.live!==P.wideCam?" hot":"");
+
+    var d=new Date();
+    document.getElementById("clock").textContent=
+      ("0"+d.getHours()).slice(-2)+":"+("0"+d.getMinutes()).slice(-2)+":"+("0"+d.getSeconds()).slice(-2);
+    var el2=Math.floor((t-timer0)/1000);
+    document.getElementById("timer").textContent=
+      ("0"+Math.floor(el2/60)).slice(-2)+":"+("0"+(el2%60)).slice(-2);
+
+    requestAnimationFrame(frame);
+  }
+  addLog("cut","engine iniciado · 8 canais · trigger ativo em CH01–CH0"+TRIG_CH);
+  requestAnimationFrame(frame);
+
+
+})();
+</script>
