@@ -18,6 +18,9 @@ struct AutomationParams
     /** Silencio necessario antes de voltar ao plano geral. Sem isso a mesa
         volta ao BG na primeira respirada entre frases. */
     std::atomic<float> wideDelayMs { 3000.0f };
+    /** Quanto um corte MANUAL (botao de teste, comando externo) segura o plano
+        antes de a automacao poder voltar ao padrao. */
+    std::atomic<float> manualHoldMs { 5000.0f };
 };
 
 struct BusParams

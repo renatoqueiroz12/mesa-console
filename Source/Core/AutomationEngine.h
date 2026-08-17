@@ -227,7 +227,20 @@ public:
         lastCutMs = timeMs;
         intendedCamera.store (cam);
         if (! c.simulated) liveCamera.store (cam);
+
+        // O disparo manual tem que RESPEITAR o hold do canal, senao a mesa
+        // corta e volta ao plano geral no instante seguinte — que e o que
+        // acontecia: sem audio, o contador de silencio ja estava vencido e o
+        // retorno ao BG saia junto com o corte.
+        holdSince (mix.channel (channel).params.trigger.holdMs.load (std::memory_order_relaxed));
         return true;
+    }
+
+    /** Segura o plano atual por N ms antes de qualquer retorno automatico. */
+    void holdSince (float ms) noexcept
+    {
+        lastActiveMs = timeMs;
+        holdUntilMs = timeMs + double (ms);
     }
 
     /** Mesma ideia, apontando direto para uma camera — util para varrer todas. */
@@ -243,6 +256,7 @@ public:
         lastCutMs = timeMs;
         intendedCamera.store (camera);
         if (! c.simulated) liveCamera.store (camera);
+        holdSince (mix.automation.manualHoldMs.load (std::memory_order_relaxed));
         return true;
     }
 

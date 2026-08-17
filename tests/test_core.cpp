@@ -937,6 +937,29 @@ int main()
         check (autom.camera() == 2, "ao liberar, reassume quem ja estava falando");
     }
 
+    // ------------------------------- permanencia do corte manual
+    {
+        MixerEngine mix; mix.prepare (48000.0, 256, 2);
+        AutomationEngine autom; autom.prepare (2);
+        auto& ch = mix.channel (0);
+        ch.params.trigger.camera.store (2);
+        ch.params.trigger.holdMs.store (3000.0f);
+        mix.automation.enabled.store (true);  mix.automation.testMode.store (false);
+        mix.automation.wideCamera.store (5);  mix.automation.wideDelayMs.store (2000.0f);
+        mix.automation.minShotMs.store (200.0f);
+
+        check (autom.testFire (mix, 0), "disparo manual sai");
+        check (autom.camera() == 2, "corte manual assume a camera do canal");
+
+        // 1 s depois, ainda tem que estar segurando
+        for (int b = 0; b < 190; ++b) autom.processBlock (mix, 256.0f / 48.0f);
+        check (autom.camera() == 2, "corte manual respeita a permanencia");
+
+        // passado o hold e o silencio, volta ao padrao
+        for (int b = 0; b < 1200; ++b) autom.processBlock (mix, 256.0f / 48.0f);
+        check (autom.camera() == 5, "vencida a permanencia, volta a camera padrao");
+    }
+
 
     std::printf ("\n%s\n", failures == 0 ? "TODOS OS TESTES PASSARAM" : "HOUVE FALHAS");
     return failures;

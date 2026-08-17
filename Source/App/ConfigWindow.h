@@ -992,11 +992,22 @@ private:
         p->addRow ("Plano minimo (ms)", minShot);
 
         auto* wide = new juce::ComboBox();
-        wide->addItem ("sem camera geral", 1);
+        wide->addItem ("nenhuma (fica onde esta)", 1);
         for (int k = 1; k <= 8; ++k) wide->addItem ("CAM " + juce::String (k), k + 1);
         wide->setSelectedId (mix.automation.wideCamera.load() + 1, juce::dontSendNotification);
         wide->onChange = [this, wide] { mix.automation.wideCamera.store (wide->getSelectedId() - 1); };
-        p->addRow ("Camera geral", wide);
+        p->addRow ("Camera padrao (BG)", wide);
+        p->addNote ("Para onde a mesa volta quando ninguem esta falando e vence o tempo "
+                    "de permanencia. Em nenhuma, ela simplesmente fica no ultimo plano.");
+
+        auto* manHold = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight);
+        manHold->setRange (0.0, 60000.0, 500.0);
+        manHold->setValue (mix.automation.manualHoldMs.load(), juce::dontSendNotification);
+        manHold->onValueChange = [this, manHold]
+        { mix.automation.manualHoldMs.store (float (manHold->getValue())); };
+        p->addRow ("Permanencia do corte manual (ms)", manHold);
+        p->addNote ("Quanto um disparo de teste ou comando externo segura o plano antes "
+                    "de a mesa poder voltar ao padrao.");
 
         p->addNote ("Cooldown e plano minimo sao GLOBAIS. Cooldown por canal nao impede "
                     "pingue-pongue entre dois microfones.");
