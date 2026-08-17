@@ -1,0 +1,185 @@
+#pragma once
+#include <juce_audio_utils/juce_audio_utils.h>
+#include "AudioEngine.h"
+#include "StripComponent.h"
+#include "CommandSender.h"
+#include "../Core/Settings.h"
+#include "../Core/Scene.h"
+
+class MainComponent : public juce::Component, private juce::Timer
+{
+public:
+    explicit MainComponent (int numChannels) : engine (numChannels)
+    {
+        // configuracao ao lado do executavel; se nao existir, usa os padroes
+        settingsFile = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
+                           .getParentDirectory().getChildFile ("settings.json");
+        if (settingsFile.existsAsFile())
+            mesa::settingsFromJson (settingsFile.loadFileAsString().toStdString(), settings);
+        else
+            settingsFile.replaceWithText (mesa::settingsToJson (settings));
+
+        auto err = engine.start (numChannels, 8);
+        status.setText (err.isEmpty() ? "dispositivo aberto" : "erro: " + err,
+                        juce::dontSendNotification);
+        addAndMakeVisible (status);
+
+        selector = std::make_unique<juce::AudioDeviceSelectorComponent> (
+                       engine.deviceManager, 1, 64, 2, 16, false, false, true, false);
+        addAndMakeVisible (*selector);
+
+        mesa::applyRouting (settings, engine.mixer);
+        sender = std::make_unique<CommandSender> (engine.automation, settings);
+
+        // cena ao lado do executavel; sem ela, um cenario minimo de bancada para
+        // que os botoes de teste facam algo na primeira execucao
+        sceneFile = settingsFile.getSiblingFile ("scene.json");
+        mesa::Scene scene;
+        if (sceneFile.existsAsFile()
+            && mesa::sceneFromJson (sceneFile.loadFileAsString().toStdString(), scene))
+        {
+            mesa::applyScene (scene, engine.mixer, false);
+            status.setText ("cena carregada: " + juce::String (scene.name), juce::dontSendNotification);
+        }
+        else
+        {
+            setupBenchDefaults();
+            sceneFile.replaceWithText (mesa::sceneToJson (mesa::captureScene (engine.mixer, "BANCADA")));
+        }
+
+        testButton.setButtonText ("Disparar teste no canal 1");
+        testButton.onClick = [this]
+        {
+            if (! engine.automation.testFire (engine.mixer, 0))
+                status.setText ("canal 1 sem camera nem comando — veja scene.json",
+                                juce::dontSendNotification);
+        };
+        addAndMakeVisible (testButton);
+
+        sweepButton.setButtonText ("Testar cameras 1 a 4");
+        sweepButton.onClick = [this]
+        {
+            for (int cam = 1; cam <= 4; ++cam) engine.automation.testCamera (engine.mixer, cam);
+        };
+        addAndMakeVisible (sweepButton);
+
+        logicButton.setButtonText ("Play / Pause no canal 2");
+        logicButton.onClick = [this]
+        {
+            deckPlaying = ! deckPlaying;
+            engine.automation.fireChannelLogic (engine.mixer, 1, deckPlaying);
+        };
+        addAndMakeVisible (logicButton);
+
+        netLog.setMultiLine (true);
+        netLog.setReadOnly (true);
+        netLog.setFont (juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 12.0f, 0)));
+        addAndMakeVisible (netLog);
+
+        testMode.setButtonText ("Modo de teste (nao envia de verdade)");
+        testMode.setToggleState (true, juce::dontSendNotification);
+        testMode.onClick = [this]
+        { engine.mixer.automation.testMode.store (testMode.getToggleState()); };
+        addAndMakeVisible (testMode);
+
+        for (int i = 0; i < engine.mixer.numChannels(); ++i)
+        {
+            auto* s = new StripComponent (engine.mixer.channel (i), i);
+            strips.add (s);
+            addAndMakeVisible (s);
+        }
+
+        setSize (1280, 720);
+        startTimerHz (25);
+    }
+
+    void paint (juce::Graphics& g) override { g.fillAll (juce::Colour (0xff0b0c0e)); }
+
+    void resized() override
+    {
+        auto r = getLocalBounds();
+        status.setBounds (r.removeFromTop (22).reduced (8, 2));
+        auto bottom = r.removeFromBottom (300);
+        auto right = bottom.removeFromRight (420).reduced (8);
+        testMode.setBounds (right.removeFromTop (26));
+        netLog.setBounds (right);
+        auto row = bottom.removeFromTop (34).reduced (8, 2);
+        const int buttonW = row.getWidth() / 3;
+        testButton .setBounds (row.removeFromLeft (buttonW).reduced (2, 0));
+        sweepButton.setBounds (row.removeFromLeft (buttonW).reduced (2, 0));
+        logicButton.setBounds (row.reduced (2, 0));
+        selector->setBounds (bottom.reduced (8));
+
+        auto strip = r.reduced (8);
+        const int n = juce::jmax (1, strips.size());
+        const int stripW = strip.getWidth() / n;
+        for (auto* s : strips) s->setBounds (strip.removeFromLeft (stripW).reduced (2));
+    }
+
+private:
+    void timerCallback() override
+    {
+        status.setText (engine.deviceName
+                        + "   |   " + juce::String (engine.sampleRate.load(), 0) + " Hz"
+                        + "   |   buffer " + juce::String (engine.blockSize.load())
+                        + "   |   latencia " + juce::String (engine.latencyMs.load(), 2) + " ms"
+                        + "   |   carga " + juce::String (engine.cpuLoad.load(), 1) + " %"
+                        + "   |   master " + juce::String (engine.mixer.masterMeterL.peakDb(), 1) + " dBFS"
+                        + "   |   cam " + juce::String (engine.automation.camera())
+                        + "   |   enviados " + juce::String (sender->sent.load())
+                        + " / falhas " + juce::String (sender->failed.load()),
+                        juce::dontSendNotification);
+        for (auto* s : strips) s->repaint();
+
+        auto lines = sender->takeLog();
+        for (const auto& l : lines) netLog.moveCaretToEnd(), netLog.insertTextAtCaret (l + "\n");
+    }
+
+    AudioEngine engine;
+    mesa::Settings settings;
+    juce::File settingsFile;
+    std::unique_ptr<CommandSender> sender;
+    juce::TextButton testButton, sweepButton, logicButton;
+    juce::File sceneFile;
+    bool deckPlaying = false;
+
+    /** Cenario minimo para a primeira bancada: canal 1 corta camera pela voz,
+        canal 2 controla a cartucheira pelo ON/OFF. Sem isso os botoes de teste
+        nao teriam o que enviar. */
+    void setupBenchDefaults()
+    {
+        auto& mic = engine.mixer.channel (0);
+        mic.name = "MIC BANCADA";
+        mic.params.sourceType.store (int (mesa::SourceType::Operator));
+        mic.params.on.store (true);
+        mic.params.faderDb.store (0.0f);
+        mic.params.trigger.enabled.store (true);
+        mic.params.trigger.camera.store (1);
+        mic.params.trigger.thresholdDb.store (-35.0f);
+        mic.params.trigger.target.store (0);          // vMix
+
+        if (engine.mixer.numChannels() > 1)
+        {
+            auto& deck = engine.mixer.channel (1);
+            deck.name = "CARTUCHEIRA";
+            deck.params.sourceType.store (int (mesa::SourceType::ComputerPlayer));
+            deck.params.faderDb.store (0.0f);
+            deck.params.logicEnabled.store (true);
+            deck.params.logicTarget.store (1);        // cartucheira, UDP
+            deck.params.onCommand .set ("DECK1_PLAY");
+            deck.params.offCommand.set ("DECK1_PAUSE");
+        }
+
+        engine.mixer.automation.enabled.store (true);
+        engine.mixer.automation.testMode.store (true);   // comeca sem mandar nada de verdade
+        engine.mixer.automation.wideCamera.store (5);
+    }
+
+    juce::TextEditor netLog;
+    juce::ToggleButton testMode;
+    juce::Label status;
+    std::unique_ptr<juce::AudioDeviceSelectorComponent> selector;
+    juce::OwnedArray<StripComponent> strips;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
+};
