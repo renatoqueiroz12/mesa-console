@@ -493,6 +493,35 @@ private:
                             + "  " + line + "\n", false, false, "\n");
     }
 
+    /** Registra mudanca de estado de cada trigger.
+
+        O log so mostrava o comando SAINDO. Quando nada saia, nao havia como
+        saber se o trigger nem chegou a candidato, se ficou preso no cooldown
+        ou se disparou e o modo de teste barrou. Agora a sequencia inteira
+        aparece, com o nivel do momento. */
+    void logTriggerChanges()
+    {
+        const int n = engine.mixer.numChannels();
+        if (int (lastTrigState.size()) != n) lastTrigState.assign (size_t (n), -1);
+
+        for (int i = 0; i < n; ++i)
+        {
+            auto& ch = engine.mixer.channel (i);
+            if (! ch.params.trigger.enabled.load()) continue;
+
+            const int st = int (engine.automation.stateOf (i));
+            if (st == lastTrigState[size_t (i)]) continue;
+            lastTrigState[size_t (i)] = st;
+
+            const auto tap = mesa::TapPoint (ch.params.trigger.source.load());
+            log ("CH" + juce::String (i + 1) + "  trigger -> "
+                 + mesa::triggerStateName (mesa::TriggerState (st))
+                 + "   (nivel " + juce::String (ch.tapDb (tap), 1)
+                 + " / threshold " + juce::String (ch.params.trigger.thresholdDb.load(), 1)
+                 + " dBFS)");
+        }
+    }
+
     void log (const juce::String& line)
     {
         logToFile (line);
@@ -548,7 +577,11 @@ private:
 
         for (const auto& in : receiver.take()) applyRemote (in);
 
-        const auto probs = hub->problems();
+        logTriggerChanges();
+
+        auto probs = hub->problems();
+        if (engine.mixer.automation.testMode.load())
+            probs.insert (probs.begin(), "MODO DE TESTE: nada e enviado ao vMix");
         alertText = probs.empty() ? juce::String()
                                   : juce::String (probs[0])
                                     + (probs.size() > 1
@@ -639,6 +672,7 @@ private:
     double startedMs = 0.0, baselineMb = 0.0;
     bool warnedMemory = false;
     bool configOpen = false;
+    std::vector<int> lastTrigState;
     /** Fader guardado por PAUSE, para o PLAY seguinte retomar no mesmo ponto. */
     std::map<int, float> pausedFader;
     std::unique_ptr<NetworkHub> hub;

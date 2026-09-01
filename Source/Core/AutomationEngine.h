@@ -127,6 +127,7 @@ public:
 
         bool anyActive = false;
         int  activeCamera = 0;
+        float activeHoldMs = 0.0f;
 
         for (int i = 0; i < n; ++i)
         {
@@ -147,7 +148,10 @@ public:
             {
                 anyActive = true;
                 if (activeCamera == 0)
+                {
                     activeCamera = ch.params.trigger.camera.load (std::memory_order_relaxed);
+                    activeHoldMs = ch.params.trigger.holdMs.load (std::memory_order_relaxed);
+                }
             }
 
             if (ev.type == TriggerEvent::Type::Fired)
@@ -159,7 +163,22 @@ public:
                 pushEvent (ev);
         }
 
-        if (anyActive) lastActiveMs = timeMs;
+        if (anyActive)
+        {
+            lastActiveMs = timeMs;
+
+            // HOLD conta do FIM da fala, nao do corte.
+            //
+            // Antes ele era armado no instante do corte: quem falasse trinta
+            // segundos ja teria o hold vencido no segundo 2,5, e ao calar a
+            // camera trocava sem nenhuma retencao. A promessa da tela — "quanto
+            // a camera fica DEPOIS que a pessoa para" — nao se cumpria.
+            //
+            // Empurrando o prazo enquanto ha fala, ele congela no ultimo
+            // instante em que alguem falou e passa a valer dali.
+            if (activeHoldMs > 0.0f)
+                holdUntilMs = timeMs + double (activeHoldMs);
+        }
 
         // Volta da suspensao: o corte normal so acontece na BORDA do trigger.
         // Se a pessoa ja estava falando durante o VT, nao ha borda nova — e a
@@ -356,7 +375,9 @@ private:
         commands.push (c);
 
         lastCutMs = timeMs;
-        holdUntilMs = timeMs + mix.channel (ev.channel).params.trigger.holdMs.load (std::memory_order_relaxed);
+        // O hold NAO e armado aqui: ele acompanha a fala e congela quando ela
+        // termina, em processBlock. Armar no corte fazia o prazo vencer no meio
+        // da propria fala, e a retencao prometida na tela nunca acontecia.
         intendedCamera.store (ev.camera);
         if (! c.simulated) liveCamera.store (ev.camera);
     }

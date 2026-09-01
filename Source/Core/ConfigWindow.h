@@ -12,7 +12,6 @@
 #include "LivewireReceiver.h"
 #include "LwrpClient.h"
 #include "VmixClient.h"
-#include "../Core/Defaults.h"
 
 /** Uma pagina de configuracao: linhas de rotulo + controle, empilhadas.
     Ela mesma cresce conforme as linhas, e o Viewport rola quando nao cabe. */
@@ -1138,10 +1137,6 @@ private:
         p->addNote ("Quanto um disparo de teste ou comando externo segura o plano antes "
                     "de a mesa poder voltar ao padrao.");
 
-        auto* resetAuto = new juce::TextButton ("VOLTAR AOS AJUSTES DE FABRICA");
-        resetAuto->onClick = [this] { mesa::resetAutomation (mix); rebuildTabs(); };
-        p->addRow ("Ajustes", resetAuto, 30);
-
         p->addNote ("Cooldown e plano minimo sao GLOBAIS. Cooldown por canal nao impede "
                     "pingue-pongue entre dois microfones.");
         p->addNote ("Para VT: a cartucheira pode mandar AUTOMACAO OFF quando a materia "
@@ -1207,25 +1202,6 @@ private:
         p->addRow ("Mesa", makeReadOnly (std::string (mesa::kVersion)
                                          + "  (" + mesa::kBuildName + ")"));
         p->addRow ("Compilada em", makeReadOnly (std::string (mesa::kBuildDate)));
-
-        p->addTitle ("Ajustes de fabrica");
-        p->addNote ("Ponto de partida para fala de estudio: threshold -35 dBFS, "
-                    "permanencia 300 ms, histerese 6 dB, hold 2500 ms, silencio antes "
-                    "do BG 3 s, plano minimo 1500 ms, nivelador em -18 dBFS a 6 dB/s. "
-                    "Nao e o ideal para a sua sala — e o NORTE de onde ajustar uma "
-                    "coisa de cada vez.");
-
-        auto* resetAll = new juce::TextButton ("RESETAR TODOS OS CANAIS E A AUTOMACAO");
-        resetAll->onClick = [this]
-        {
-            mesa::resetAll (mix);
-            statusLabel.setText ("ajustes de fabrica aplicados a todos os canais",
-                                 juce::dontSendNotification);
-            rebuildTabs();
-        };
-        p->addWide (resetAll, 32);
-        p->addNote ("Fonte, roteamento, camera e comandos NAO sao tocados: o reset "
-                    "devolve os TEMPOS e NIVEIS, nao a instalacao.");
 
         p->addTitle ("Instalacao");
         p->addRow ("Arquivo de configuracao", makeReadOnly (settingsFile.getFullPathName().toStdString()));

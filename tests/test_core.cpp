@@ -4,6 +4,7 @@
 #include "../Source/Core/Settings.h"
 #include "../Source/Core/AsyncSource.h"
 #include "../Source/Core/RateConverter.h"
+#include "../Source/Core/Defaults.h"
 #include "../Source/Core/AutomationEngine.h"
 #include <thread>
 #include <cstdio>
@@ -958,6 +959,79 @@ int main()
         // passado o hold e o silencio, volta ao padrao
         for (int b = 0; b < 1200; ++b) autom.processBlock (mix, 256.0f / 48.0f);
         check (autom.camera() == 5, "vencida a permanencia, volta a camera padrao");
+    }
+
+    // ------------------------------------------- ajustes de fabrica
+    {
+        MixerEngine mix; mix.prepare (48000.0, 256, 2);
+        auto& ch = mix.channel (0);
+
+        // bagunca proposital
+        ch.params.trigger.thresholdDb.store (-2.0f);
+        ch.params.trigger.holdMs.store (10.0f);
+        ch.params.trigger.camera.store (7);
+        ch.params.trigger.command.set ("FUNCTION Overlay1In");
+        ch.params.autoMix.targetDb.store (-3.0f);
+
+        resetChannel (ch);
+
+        check (ch.params.trigger.thresholdDb.load() == Defaults::kThresholdDb,
+               "reset devolve o threshold de fabrica");
+        check (ch.params.trigger.holdMs.load() == Defaults::kHoldMs,
+               "reset devolve o hold de fabrica");
+        check (ch.params.autoMix.targetDb.load() == Defaults::kAutoTargetDb,
+               "reset devolve o alvo do nivelador");
+        check (ch.params.trigger.camera.load() == 7,
+               "reset NAO mexe na camera: aquilo e instalacao");
+        check (ch.params.trigger.command.str() == "FUNCTION Overlay1In",
+               "reset NAO apaga o comando literal");
+
+        mix.automation.minShotMs.store (10.0f);
+        mix.automation.wideCamera.store (5);
+        resetAutomation (mix);
+        check (mix.automation.minShotMs.load() == Defaults::kMinShotMs,
+               "reset devolve o plano minimo");
+        check (mix.automation.wideCamera.load() == 5,
+               "reset preserva a camera padrao");
+    }
+
+    // --------------------- hold conta do FIM da fala, nao do corte
+    {
+        MixerEngine mix; mix.prepare (48000.0, 256, 2);
+        AutomationEngine autom; autom.prepare (2);
+        auto& ch = mix.channel (0);
+        ch.params.inputIndex.store (0); ch.params.on.store (true);
+        ch.params.busMask.store (1);    ch.params.faderDb.store (0.0f);
+        auto& tr = ch.params.trigger;
+        tr.enabled.store (true); tr.camera.store (2); tr.thresholdDb.store (-40.0f);
+        tr.triggerMs.store (100.0f); tr.source.store (0);
+        tr.holdMs.store (5000.0f); tr.releaseMs.store (300.0f);
+        mix.automation.enabled.store (true);  mix.automation.testMode.store (false);
+        mix.automation.wideCamera.store (5);  mix.automation.wideDelayMs.store (1000.0f);
+        mix.automation.minShotMs.store (200.0f);
+
+        std::vector<float> in (256), oL (256), oR (256);
+        const float* ins[1] = { in.data() }; float* outs[2] = { oL.data(), oR.data() };
+        double ph = 0.0; const float bms = 256.0f / 48.0f;
+        auto run = [&] (double secs, bool loud)
+        {
+            const int blocks = int (secs * 1000.0 / bms);
+            for (int b = 0; b < blocks; ++b)
+            {
+                for (int i = 0; i < 256; ++i)
+                { in[size_t (i)] = loud ? 0.5f * std::sin (ph) : 0.0f; ph += 0.07; }
+                mix.process (ins, 1, outs, 2, 256);
+                autom.processBlock (mix, bms);
+            }
+        };
+
+        // fala LONGA: com o hold armado no corte, ele ja teria vencido aqui
+        run (20.0, true);
+        check (autom.camera() == 2, "fala longa mantem a camera do canal");
+        run (2.0, false);
+        check (autom.camera() == 2, "hold conta do fim da fala, nao do corte");
+        run (5.0, false);
+        check (autom.camera() == 5, "vencido o hold, volta a camera padrao");
     }
 
 

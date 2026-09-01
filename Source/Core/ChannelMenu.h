@@ -9,7 +9,6 @@
 #include "../Core/Settings.h"
 #include "../Core/SourceCatalog.h"
 #include "VmixClient.h"
-#include "../Core/Defaults.h"
 
 /** Menu do canal, aberto pela tecla SOFT. Sete secoes, como no mockup:
     fonte, ganho, buses, rack de DSP, trigger, logica e validacao.
@@ -108,8 +107,6 @@ private:
             diagLabel->setText (diagnosticsText(), juce::dontSendNotification);
         if (calLabel != nullptr)
             calLabel->setText (calibratorText(), juce::dontSendNotification);
-        if (trigLabel != nullptr)
-            trigLabel->setText (triggerText(), juce::dontSendNotification);
     }
 
     // ------------------------------------------------------------- helpers
@@ -260,10 +257,6 @@ private:
         p->addNote ("Velocidade alta reage rapido e bombeia; baixa e discreta e demora "
                     "a acompanhar quem fala muito baixo. 4 a 8 dB/s costuma ser o ponto.");
 
-        auto* resetAm = new juce::TextButton ("VOLTAR AOS AJUSTES DE FABRICA");
-        resetAm->onClick = [this] { mesa::resetAutoMix (ch); rebuildTabs(); };
-        p->addRow ("Ajustes", resetAm, 30);
-
         p->addTitle ("Auto trim");
         p->addNote ("Corrige o nivel medio da fonte antes do DSP. Nao substitui o trim "
                     "manual: trabalha por cima dele, devagar, e para no silencio.");
@@ -390,15 +383,6 @@ private:
         auto& tr = ch.params.trigger;
 
         p->addTitle ("Audio Trigger");
-
-        // Diagnostico ao vivo. Sem isto, "nao dispara" nao tem investigacao:
-        // pode ser sinal fraco, threshold alto, permanencia longa, canal
-        // fechado ou modo de teste. A linha abaixo diz qual dos cinco e.
-        trigLabel = new juce::Label ({}, triggerText());
-        trigLabel->setFont (theme::mono (11.0f));
-        trigLabel->setColour (juce::Label::textColourId, theme::oled);
-        trigLabel->setJustificationType (juce::Justification::topLeft);
-        p->addWide (trigLabel, 76);
         toggle (*p, "Ligado", tr.enabled.load(), [&tr] (bool v) { tr.enabled.store (v); });
 
         auto* tapBox = new juce::ComboBox();
@@ -487,17 +471,6 @@ private:
         targetBox->onChange = [&tr, targetBox] { tr.target.store (targetBox->getSelectedId() - 1); };
         p->addRow ("Destino", targetBox);
 
-        auto* reset = new juce::TextButton ("VOLTAR AOS AJUSTES DE FABRICA");
-        reset->onClick = [this]
-        {
-            mesa::resetTrigger (ch);
-            rebuildTabs();
-        };
-        p->addRow ("Ajustes", reset, 30);
-        p->addNote ("Volta threshold, permanencia, histerese, hold, release e cooldown "
-                    "ao ponto de partida. Camera e comando NAO sao tocados — aquilo e "
-                    "instalacao, e perder num reset seria pior que o problema.");
-
         auto* fire = new juce::TextButton ("DISPARAR TESTE");
         fire->onClick = [this] { autom.testFire (mix, index); };
         p->addRow ("Teste", fire, 30);
@@ -576,36 +549,6 @@ private:
         return p;
     }
 
-    /** Por que esta (ou nao esta) disparando, em uma olhada. */
-    juce::String triggerText() const
-    {
-        const auto& tr = ch.params.trigger;
-        const auto tap = mesa::TapPoint (tr.source.load());
-        const float lvl = ch.tapDb (tap);
-        const float thr = tr.thresholdDb.load();
-        const float margem = lvl - thr;
-
-        juce::String motivo;
-        if (! tr.enabled.load())                 motivo = "TRIGGER DESLIGADO";
-        else if (tr.camera.load() <= 0
-                 && ch.params.trigger.command.str().empty())
-                                                 motivo = "SEM FONTE NO VMIX E SEM COMANDO";
-        else if (margem < 0.0f)
-            motivo = "NIVEL ABAIXO DO THRESHOLD: faltam "
-                   + juce::String (-margem, 1) + " dB";
-        else                                     motivo = "acima do threshold";
-
-        return juce::String ("nivel agora: ") + juce::String (lvl, 1) + " dBFS"
-             + "   threshold: " + juce::String (thr, 1) + " dBFS"
-             + "   margem: " + (margem >= 0 ? "+" : "") + juce::String (margem, 1) + " dB"
-             + "\nestado: " + mesa::triggerStateName (autom.stateOf (index))
-             + "   camera no ar: " + juce::String (autom.camera())
-             + "\n" + motivo
-             + (settings.remoteEnabled ? "" : "")
-             + (mix.automation.testMode.load()
-                    ? "\nMODO DE TESTE LIGADO: dispara, mas nao envia nada ao vMix" : "");
-    }
-
     juce::String diagnosticsText() const
     {
         return juce::String ("sinal presente: ") + (ch.presence.hasSignal() ? "sim" : "nao")
@@ -637,7 +580,6 @@ private:
     juce::Label header;
     juce::Label* diagLabel = nullptr;
     juce::Label* calLabel = nullptr;
-    juce::Label* trigLabel = nullptr;
     std::vector<VmixClient::Input> vmixInputs;
     juce::String vmixStatus;
 

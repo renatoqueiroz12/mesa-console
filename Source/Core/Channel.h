@@ -109,11 +109,11 @@ struct TriggerParams
     std::atomic<bool>  enabled      { false };
     std::atomic<int>   source       { int (TapPoint::Input) };
     std::atomic<float> thresholdDb  { -35.0f };
-    std::atomic<float> triggerMs    { 150.0f };
-    std::atomic<float> holdMs       { 800.0f };
+    std::atomic<float> triggerMs    { 300.0f };
+    std::atomic<float> holdMs       { 2500.0f };
     std::atomic<float> releaseMs    { 400.0f };
-    std::atomic<float> cooldownMs   { 500.0f };
-    std::atomic<float> hysteresisDb {   5.0f };
+    std::atomic<float> cooldownMs   { 1000.0f };
+    std::atomic<float> hysteresisDb {   6.0f };
     std::atomic<int>   camera       { 0 };     // 0 = sem camera
 
     /** Comando literal enviado quando este canal dispara. Vazio = a mesa monta

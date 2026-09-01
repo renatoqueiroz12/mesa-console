@@ -2,6 +2,7 @@
 #include "AudioEngine.h"
 #include "NdiEngine.h"
 #include "SecondaryDevices.h"
+#include "LivewireReceiver.h"
 #include "../Core/SourceCatalog.h"
 #include <map>
 #include <memory>
@@ -38,7 +39,11 @@ public:
 
             mesa::AsyncSource* q = nullptr;
 
-            if (! src.streamName.empty())
+            if (src.livewireChannel > 0)
+            {
+                q = livewireQueue (src.livewireChannel, src.livewireSide, sampleRate, blockSize);
+            }
+            else if (! src.streamName.empty())
             {
                 q = ndiQueue (src.streamName, sampleRate, blockSize);
             }
@@ -61,6 +66,16 @@ public:
 
         for (int i = slot; i < AudioEngine::kMaxNetSlots; ++i)
             engine.setNetSlot (i, nullptr);
+
+        // fecha receptores Livewire que sairam do catalogo
+        for (auto it = livewire.begin(); it != livewire.end(); )
+        {
+            const std::string k = "lw:" + std::to_string (it->first) + ":0";
+            const std::string k2 = "lw:" + std::to_string (it->first) + ":1";
+            if (stillUsed.find (k) == stillUsed.end() && stillUsed.find (k2) == stillUsed.end())
+            { it->second.receiver->stop(); it = livewire.erase (it); }
+            else ++it;
+        }
 
         // fecha receptores NDI que sairam do catalogo
         for (auto it = ndi.begin(); it != ndi.end(); )
@@ -102,6 +117,10 @@ public:
     std::vector<juce::String> problems() const
     {
         auto v = secondaries.lostDevices();
+        if (lastLivewireError.isNotEmpty()) v.push_back ("Livewire: " + lastLivewireError);
+        for (auto& kv : livewire)
+            if (kv.second.receiver->packets() == 0)
+                v.push_back ("Livewire canal " + juce::String (kv.first) + " sem pacotes");
         for (auto& kv : ndi)
             if (! kv.second.queue->isConnected())
                 v.push_back ("NDI sem sinal: " + juce::String (kv.first));
@@ -109,6 +128,14 @@ public:
     }
 
 private:
+    struct LwSlot
+    {
+        std::unique_ptr<mesa::AsyncSource> left, right;
+        std::unique_ptr<LivewireReceiver> receiver;
+    };
+    std::map<int, LwSlot> livewire;
+    juce::String lastLivewireError;
+
     struct NdiSlot
     {
         std::unique_ptr<mesa::AsyncSource> queue;
@@ -117,10 +144,42 @@ private:
 
     static std::string keyOf (const mesa::SourceDef& s)
     {
+        if (s.livewireChannel > 0)
+            return "lw:" + std::to_string (s.livewireChannel) + ":"
+                 + std::to_string (s.livewireSide);
         if (! s.streamName.empty()) return "ndi:" + s.streamName;
         if (! s.deviceName.empty()) return "dev:" + s.deviceName + ":"
                                          + std::to_string (s.deviceChannel);
         return {};
+    }
+
+    /** Um receptor por CANAL; os dois lados do estereo saem dele. */
+    mesa::AsyncSource* livewireQueue (int channel, int side, double sr, int block)
+    {
+        auto it = livewire.find (channel);
+        if (it == livewire.end())
+        {
+            LwSlot slot;
+            slot.left  = std::make_unique<mesa::AsyncSource>();
+            slot.right = std::make_unique<mesa::AsyncSource>();
+            // fila rasa: o Livewire chega em cadencia regular, e latencia
+            // acumulada aqui e latencia no ar
+            slot.left ->prepare (block, 6, sr, 0.35);
+            slot.right->prepare (block, 6, sr, 0.35);
+            slot.left ->name = "LW " + std::to_string (channel) + " L";
+            slot.right->name = "LW " + std::to_string (channel) + " R";
+            slot.left ->kind = mesa::AsyncSource::Kind::Ndi;
+            slot.right->kind = mesa::AsyncSource::Kind::Ndi;
+
+            slot.receiver = std::make_unique<LivewireReceiver> (*slot.left, *slot.right);
+            if (! slot.receiver->start (channel))
+            {
+                lastLivewireError = slot.receiver->error();
+                return nullptr;
+            }
+            it = livewire.emplace (channel, std::move (slot)).first;
+        }
+        return side == 1 ? it->second.right.get() : it->second.left.get();
     }
 
     mesa::AsyncSource* ndiQueue (const std::string& stream, double sr, int block)

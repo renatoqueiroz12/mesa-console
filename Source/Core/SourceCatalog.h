@@ -29,6 +29,10 @@ struct SourceDef
     std::string deviceName;
     std::string deviceType;              // "ASIO" ou "Windows Audio"
     int  deviceChannel = 0;
+    /** Canal Livewire (1..32767). Vira multicast por conta: 239.192.y.z com
+        canal = y*256+z. Zero significa que esta fonte nao usa Livewire. */
+    int  livewireChannel = 0;
+    int  livewireSide = 0;               // 0 = esquerdo, 1 = direito
     int  type = int (SourceType::Line);  // define mute de monitor e mix-minus
 
     float trimDb = 0.0f;
@@ -260,6 +264,8 @@ inline json::Value sourceToJson (const SourceDef& s)
     o.set ("stream",         json::text    (s.streamName));
     o.set ("device",         json::text    (s.deviceName));
     o.set ("deviceType",     json::text    (s.deviceType));
+    o.set ("lwChannel",      json::num     (s.livewireChannel));
+    o.set ("lwSide",         json::num     (s.livewireSide));
     o.set ("deviceChannel",  json::num     (s.deviceChannel));
     o.set ("type",           json::num     (s.type));
     o.set ("trimDb",         json::num     (s.trimDb));
@@ -293,6 +299,8 @@ inline SourceDef sourceFromJson (const json::Value& o)
     s.streamName     = o.string  ("stream");
     s.deviceName     = o.string  ("device");
     s.deviceType     = o.string  ("deviceType");
+    s.livewireChannel = int (o.number ("lwChannel", 0));
+    s.livewireSide    = int (o.number ("lwSide", 0));
     s.deviceChannel  = int (o.number ("deviceChannel", 0));
     s.type           = int (o.number ("type", double (int (SourceType::Line))));
     s.trimDb         = float (o.number ("trimDb", 0.0));

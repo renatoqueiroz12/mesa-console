@@ -204,6 +204,13 @@ struct Settings
     SourceCatalog catalog;
     OutputCatalog outputs;
 
+    /** Porta da API em XML do vMix, usada so para LISTAR as entradas.
+        Diferente da 8099, que e por onde os comandos saem. */
+    int vmixApiPort = 8088;
+
+    /** No Axia/Livewire consultado para listar fontes (LWRP, porta 93). */
+    std::string livewireNode;
+
     /** Recepcao de comandos externos (cartucheira, playout, automacao). */
     bool remoteEnabled   = true;
     int  remoteUdpPort   = 8890;
@@ -362,6 +369,8 @@ inline std::string settingsToJson (const Settings& s)
     p.set ("vst3Path",         text (s.dsp.vst3Path));
     root.set ("dsp", p);
 
+    root.set ("vmixApiPort",     num (s.vmixApiPort));
+    root.set ("livewireNode",    text (s.livewireNode));
     root.set ("remoteEnabled",   boolean (s.remoteEnabled));
     root.set ("remoteUdpPort",   num (s.remoteUdpPort));
     root.set ("remoteTcpPort",   num (s.remoteTcpPort));
@@ -503,6 +512,8 @@ inline bool settingsFromJson (const std::string& src, Settings& out)
         out.dsp.scanOutOfProcess = p->boolean ("scanOutOfProcess", true);
         out.dsp.vst3Path         = p->string ("vst3Path");
     }
+    out.vmixApiPort       = int (root.number ("vmixApiPort", 8088));
+    out.livewireNode      = root.string ("livewireNode");
     out.remoteEnabled     = root.boolean ("remoteEnabled", true);
     out.remoteUdpPort     = int (root.number ("remoteUdpPort", 8890));
     out.remoteTcpPort     = int (root.number ("remoteTcpPort", 8890));
