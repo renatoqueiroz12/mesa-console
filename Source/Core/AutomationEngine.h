@@ -85,6 +85,12 @@ public:
     /** Relogio interno, para quem precisa marcar prazo de suspensao. */
     double nowMs() const noexcept { return timeMs; }
 
+    /** Quantas vezes a conversa cruzada levou ao plano aberto. */
+    std::atomic<int> crossTalks { 0 };
+
+    /** Ha dois ou mais falando agora. */
+    bool emConversaCruzada() const noexcept { return multiTalkSince >= 0.0; }
+
     /** Quanto falta para voltar ao plano padrao, em ms. Zero quando ja voltou
         ou quando alguem ainda esta falando. Existe para a interface poder
         MOSTRAR a contagem: sem isso o operador acha que travou. */
@@ -115,6 +121,7 @@ public:
         levels  .assign (size_t (numChannels), kMinusInfDb);
         timeMs = 0.0; lastCutMs = -1e9; holdUntilMs = 0.0; lastActiveMs = 0.0;
         wasQuiet = false;
+        multiTalkSince = -1.0;
         liveCamera.store (0);
         intendedCamera.store (0);
     }
@@ -142,6 +149,7 @@ public:
         bool anyActive = false;
         int  activeCamera = 0;
         float activeHoldMs = 0.0f;
+        int  numFalando = 0;
 
         for (int i = 0; i < n; ++i)
         {
@@ -161,6 +169,7 @@ public:
              || triggers[size_t (i)]->current() == TriggerState::Candidate)
             {
                 anyActive = true;
+                if (triggers[size_t (i)]->current() == TriggerState::Active) ++numFalando;
                 if (activeCamera == 0)
                 {
                     activeCamera = ch.params.trigger.camera.load (std::memory_order_relaxed);
@@ -217,6 +226,65 @@ public:
         // ninguem falando: volta para a camera geral depois do silencio pedido
         const int wide = mix.automation.wideCamera.load (std::memory_order_relaxed);
         const double quietFor = timeMs - lastActiveMs;
+        // ---- conversa cruzada: dois ou mais falando ao mesmo tempo
+        //
+        // Sem isto a mesa fica alternando entre quem esta mais alto a cada
+        // instante, e o resultado no ar e um corta-corta que cansa. O plano
+        // aberto e a resposta certa: mostra as duas pessoas discutindo.
+        //
+        // Exige permanencia propria porque sobreposicao curta e normal na fala
+        // — alguem concorda, ri, completa a frase do outro. So vira conversa
+        // cruzada quando se sustenta.
+        const float multiMs = A.multiTalkMs.load (std::memory_order_relaxed);
+        if (numFalando >= 2)
+        {
+            if (multiTalkSince < 0.0) multiTalkSince = timeMs;
+        }
+        else
+        {
+            // Saiu da conversa cruzada e sobrou UM falando: reassume a camera
+            // dele. Sem isto a mesa fica presa no plano aberto, porque quem
+            // continuou falando nunca gerou borda nova de trigger.
+            if (multiTalkSince >= 0.0 && anyActive && activeCamera > 0
+                && intendedCamera.load() != activeCamera && ! quiet)
+            {
+                Command c;
+                c.type = Command::Type::Cut; c.camera = activeCamera; c.channel = -1;
+                c.simulated = A.testMode.load (std::memory_order_relaxed);
+                c.timeMs = timeMs;
+                if (A.enabled.load (std::memory_order_relaxed) && commands.push (c))
+                {
+                    intendedCamera.store (activeCamera);
+                    if (! c.simulated) liveCamera.store (activeCamera);
+                    lastCutMs = timeMs;
+                }
+            }
+            multiTalkSince = -1.0;
+        }
+
+        if (! quiet && multiMs > 0.0f && multiTalkSince >= 0.0
+            && timeMs - multiTalkSince >= double (multiMs))
+        {
+            const int alvo = A.multiTalkCamera.load (std::memory_order_relaxed) > 0
+                                 ? A.multiTalkCamera.load (std::memory_order_relaxed)
+                                 : A.wideCamera.load (std::memory_order_relaxed);
+
+            if (alvo > 0 && intendedCamera.load() != alvo)
+            {
+                Command c;
+                c.type = Command::Type::Cut; c.camera = alvo; c.channel = -1;
+                c.simulated = A.testMode.load (std::memory_order_relaxed);
+                c.timeMs = timeMs;
+                if (A.enabled.load (std::memory_order_relaxed) && commands.push (c))
+                {
+                    intendedCamera.store (alvo);
+                    if (! c.simulated) liveCamera.store (alvo);
+                    lastCutMs = timeMs;
+                    ++crossTalks;
+                }
+            }
+        }
+
         // Um controle so manda no retorno: o HOLD do canal que estava no ar.
         //
         // Antes havia tres prazos concorrendo — hold, "silencio antes do BG" e
@@ -418,6 +486,7 @@ private:
     std::vector<bool>  prevOn;
     double timeMs = 0.0, lastCutMs = -1e9, holdUntilMs = 0.0, lastActiveMs = 0.0;
     bool wasQuiet = false;
+    double multiTalkSince = -1.0;
     std::atomic<int> liveCamera { 0 }, intendedCamera { 0 }, rejected { 0 }, ignored { 0 };
 
 };

@@ -1082,6 +1082,84 @@ int main()
         check (longo - curto > 3.5, "mexer no hold muda o tempo na proporcao esperada");
     }
 
+    // ------------------- ajustes do operador sobrevivem ao reinicio
+    {
+        // A cena era gravada UMA vez, no primeiro arranque, e nunca mais: tudo
+        // que fosse ajustado no SOFT morria ao fechar a mesa. Este teste fixa o
+        // contrato de que o ajuste do dia a dia volta na proxima abertura.
+        MixerEngine a; a.prepare (48000.0, 256, 4);
+        auto& ch = a.channel (0);
+        ch.name = "MIC BANCADA";
+        ch.params.trigger.enabled.store (true);
+        ch.params.trigger.camera.store (2);
+        ch.params.trigger.thresholdDb.store (-35.0f);
+        ch.params.trigger.holdMs.store (800.0f);
+        ch.params.trigger.triggerMs.store (150.0f);
+        ch.params.busMask.store (1);
+        ch.params.faderDb.store (-3.5f);
+
+        const auto json = sceneToJson (captureScene (a, "ATUAL"));
+
+        MixerEngine b; b.prepare (48000.0, 256, 4);
+        Scene cena;
+        check (sceneFromJson (json, cena), "cena gravada volta do JSON");
+        applyScene (cena, b, false);
+
+        auto& c2 = b.channel (0);
+        check (c2.name == "MIC BANCADA", "nome do canal sobrevive ao reinicio");
+        check (c2.params.trigger.camera.load() == 2, "camera sobrevive ao reinicio");
+        check (c2.params.trigger.thresholdDb.load() == -35.0f, "threshold sobrevive");
+        check (c2.params.trigger.holdMs.load() == 800.0f, "hold sobrevive");
+        check (c2.params.trigger.enabled.load(), "trigger ligado sobrevive");
+    }
+
+    // ------------------------- conversa cruzada leva ao plano aberto
+    {
+        MixerEngine mix; mix.prepare (48000.0, 256, 3);
+        AutomationEngine autom; autom.prepare (3);
+        for (int i = 0; i < 2; ++i)
+        {
+            auto& c = mix.channel (i);
+            c.params.inputIndex.store (i); c.params.on.store (true);
+            c.params.busMask.store (1);    c.params.faderDb.store (0.0f);
+            auto& t = c.params.trigger;
+            t.enabled.store (true); t.camera.store (2 + i); t.thresholdDb.store (-40.0f);
+            t.triggerMs.store (150.0f); t.source.store (0);
+            t.holdMs.store (2000.0f);   t.releaseMs.store (300.0f);
+        }
+        mix.automation.enabled.store (true);  mix.automation.testMode.store (false);
+        mix.automation.wideCamera.store (5);
+        mix.automation.multiTalkMs.store (1500.0f);
+        mix.automation.minShotMs.store (300.0f);
+
+        std::vector<float> a (256), b (256), oL (256), oR (256);
+        const float* ins[2] = { a.data(), b.data() }; float* outs[2] = { oL.data(), oR.data() };
+        double p1 = 0.0, p2 = 0.0; const float bms = 256.0f / 48.0f;
+        auto run = [&] (double secs, bool f1, bool f2)
+        {
+            const int n = int (secs * 1000.0 / bms);
+            for (int k = 0; k < n; ++k)
+            {
+                for (int i = 0; i < 256; ++i)
+                {
+                    a[size_t (i)] = f1 ? 0.5f * std::sin (p1) : 0.0f; p1 += 0.07;
+                    b[size_t (i)] = f2 ? 0.5f * std::sin (p2) : 0.0f; p2 += 0.05;
+                }
+                mix.process (ins, 2, outs, 2, 256);
+                autom.processBlock (mix, bms);
+            }
+        };
+
+        run (2.0, true, false);
+        check (autom.camera() == 2, "um falando: camera dele");
+        run (1.0, true, true);
+        check (autom.camera() != 5, "sobreposicao curta NAO vai ao plano aberto");
+        run (1.5, true, true);
+        check (autom.camera() == 5, "conversa cruzada sustentada vai ao plano aberto");
+        run (3.0, false, true);
+        check (autom.camera() == 3, "terminada a conversa, quem segue falando reassume");
+    }
+
 
     std::printf ("\n%s\n", failures == 0 ? "TODOS OS TESTES PASSARAM" : "HOUVE FALHAS");
     return failures;

@@ -1088,6 +1088,37 @@ private:
         dbSlider (*p, "Dominancia (dB)", mix.automation.dominanceDb.load(), 0.0f, 20.0f,
                   [this] (float v) { mix.automation.dominanceDb.store (v); });
 
+        auto* multi = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight);
+        multi->setRange (0.0, 10000.0, 100.0);
+        multi->setValue (mix.automation.multiTalkMs.load(), juce::dontSendNotification);
+        multi->onValueChange = [this, multi]
+        { mix.automation.multiTalkMs.store (float (multi->getValue())); };
+        p->addRow ("Conversa cruzada (ms)", multi);
+
+        auto* multiCam = new juce::ComboBox();
+        multiCam->addItem ("usar a camera padrao", 1);
+        int msel = 1, mid = 2;
+        for (const auto& vi : vmixInputs)
+        {
+            multiCam->addItem (VmixClient::label (vi), mid);
+            if (vi.number == mix.automation.multiTalkCamera.load()) msel = mid;
+            ++mid;
+        }
+        multiCam->setSelectedId (msel, juce::dontSendNotification);
+        auto mlist = vmixInputs;
+        multiCam->onChange = [this, multiCam, mlist]
+        {
+            const int i = multiCam->getSelectedId() - 2;
+            mix.automation.multiTalkCamera.store (i >= 0 && i < int (mlist.size())
+                                                      ? mlist[size_t (i)].number : 0);
+        };
+        p->addRow ("Plano da conversa cruzada", multiCam);
+        p->addNote ("Quando DUAS ou mais pessoas falam ao mesmo tempo por esse tempo, "
+                    "a mesa vai para o plano aberto em vez de ficar escolhendo entre "
+                    "elas. Sobreposicao curta e normal na fala — alguem concorda, ri, "
+                    "completa a frase — por isso ha permanencia propria. Zero desliga. "
+                    "Terminada a conversa, quem continuar falando reassume a camera.");
+
         auto* minShot = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight);
         minShot->setRange (200.0, 15000.0, 50.0);
         minShot->setValue (mix.automation.minShotMs.load(), juce::dontSendNotification);
@@ -1267,7 +1298,15 @@ private:
                     "devolve os TEMPOS e NIVEIS, nao a instalacao.");
 
         p->addTitle ("Instalacao");
-        p->addRow ("Arquivo de configuracao", makeReadOnly (settingsFile.getFullPathName().toStdString()));
+        p->addRow ("Configuracao guardada em",
+                   makeReadOnly (settingsFile.getParentDirectory().getFullPathName().toStdString()));
+        p->addNote ("Fica FORA da pasta de compilacao de proposito: build/ e descartavel "
+                    "e some a cada reconfiguracao, levando junto nomes de canal, "
+                    "thresholds e cameras. Aqui sobrevive a versao nova e a build limpo.");
+
+        auto* abrir = new juce::TextButton ("ABRIR A PASTA");
+        abrir->onClick = [this] { settingsFile.getParentDirectory().revealToUser(); };
+        p->addRow ("", abrir, 28);
         p->addRow ("Faders por camada", makeReadOnly (std::to_string (settings.surface.fadersPerLayer)));
         p->addRow ("Camadas", makeReadOnly (std::to_string (settings.surface.layers)));
         p->addRow ("Canais", makeReadOnly (std::to_string (mix.numChannels())));

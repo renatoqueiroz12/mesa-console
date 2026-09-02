@@ -37,8 +37,33 @@ public:
 
     explicit MainComponent (int numChannels) : engine (numChannels), bridge (engine.mixer)
     {
-        settingsFile = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
-                           .getParentDirectory().getChildFile ("settings.json");
+        // ONDE a configuracao mora.
+        //
+        // Ate aqui ela ficava ao lado do exe, dentro de build/ — pasta
+        // descartavel, que some a cada reconfiguracao do CMake. Levava junto
+        // nomes de canal, thresholds, holds, cameras: tudo que o operador
+        // ajustou. Configuracao nao pode morar em pasta de compilacao.
+        //
+        // Agora fica na area de dados do usuario, que sobrevive a build limpo,
+        // a troca de versao e ate a apagar o projeto inteiro.
+        auto pasta = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                        .getChildFile ("MesaConsole");
+        pasta.createDirectory();
+
+        settingsFile = pasta.getChildFile ("settings.json");
+        sceneFile    = pasta.getChildFile ("scene.json");
+
+        // Migracao: se houver configuracao antiga ao lado do exe e ainda nao
+        // houver na pasta nova, traz junto — ninguem perde o que ja ajustou.
+        auto antigaPasta = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
+                              .getParentDirectory();
+        for (juce::File* par : { &settingsFile, &sceneFile })
+        {
+            auto antiga = antigaPasta.getChildFile (par->getFileName());
+            if (! par->existsAsFile() && antiga.existsAsFile())
+                antiga.copyFileTo (*par);
+        }
+
         if (settingsFile.existsAsFile())
             mesa::settingsFromJson (settingsFile.loadFileAsString().toStdString(), settings);
         else
@@ -50,7 +75,6 @@ public:
         mesa::applyRouting (settings, engine.mixer);
         sender = std::make_unique<CommandSender> (engine.automation, settings);
 
-        sceneFile = settingsFile.getSiblingFile ("scene.json");
         mesa::Scene scene;
         if (sceneFile.existsAsFile()
             && mesa::sceneFromJson (sceneFile.loadFileAsString().toStdString(), scene))
@@ -59,6 +83,7 @@ public:
         {
             setupBenchDefaults();
             sceneFile.replaceWithText (mesa::sceneToJson (mesa::captureScene (engine.mixer, "BANCADA")));
+            logToFile ("primeira execucao: cena de fabrica criada");
         }
 
         addAndMakeVisible (bridge);
@@ -79,6 +104,7 @@ public:
 
         logFile = settingsFile.getSiblingFile ("mesa.log");
         startedMs = juce::Time::getMillisecondCounterHiRes();
+        logToFile ("configuracao em: " + settingsFile.getParentDirectory().getFullPathName());
         logToFile (juce::String ("=== mesa iniciada ===  v") + mesa::kVersion
                    + " (" + mesa::kBuildName + ", " + mesa::kBuildDate + ")  |  "
                    + juce::SystemStats::getOperatingSystemName()
@@ -138,8 +164,40 @@ public:
         startTimerHz (25);
     }
 
+    /** Grava cena e configuracoes.
+
+        A cena guarda o que o operador ajusta no dia a dia: nome do canal,
+        threshold, hold, camera, buses, fader. Ate aqui ela era escrita UMA vez,
+        no primeiro arranque, e nunca mais — tudo que fosse ajustado depois
+        morria ao fechar a mesa. Nao era problema de "versao nova": era em todo
+        reinicio.
+
+        Guarda o arquivo anterior como .bak antes de sobrescrever. Se a mesa cair
+        no meio da escrita, o ajuste de ontem continua recuperavel. */
+    void salvarEstado (const char* motivo)
+    {
+        if (sceneFile.getFullPathName().isEmpty()) return;
+
+        const auto json = mesa::sceneToJson (mesa::captureScene (engine.mixer, "ATUAL"));
+        if (json.size() < 32) return;                 // nunca grava lixo por cima
+
+        if (sceneFile.existsAsFile())
+            sceneFile.copyFileTo (sceneFile.getSiblingFile ("scene.json.bak"));
+        sceneFile.replaceWithText (json);
+
+        const auto cfg = mesa::settingsToJson (settings);
+        if (cfg.size() > 32)
+        {
+            if (settingsFile.existsAsFile())
+                settingsFile.copyFileTo (settingsFile.getSiblingFile ("settings.json.bak"));
+            settingsFile.replaceWithText (cfg);
+        }
+        logToFile (juce::String ("estado salvo (") + motivo + ")");
+    }
+
     ~MainComponent() override
     {
+        salvarEstado ("fechando");
         // Sem esta linha, "sumiu" e "foi fechada" ficam indistinguiveis no log.
         logToFile ("=== mesa encerrada normalmente ===");
     }
@@ -288,7 +346,12 @@ private:
         o.content.setOwned (cfg);
         o.dialogTitle = "Configuracoes";
         configOpen = true;
-        cfg->onClosed = [this] { configOpen = false; rebindNetwork(); };
+        cfg->onClosed = [this]
+        {
+            configOpen = false;
+            rebindNetwork();
+            salvarEstado ("configuracoes fechadas");
+        };
         o.dialogBackgroundColour = theme::surface;
         o.escapeKeyTriggersCloseButton = true;
         o.useNativeTitleBar = true;
@@ -440,6 +503,10 @@ private:
                   << (d->isLost() ? " PERDIDA" : "");
 
         logToFile (l);
+
+        // salva junto do batimento: se a mesa cair, perde-se no maximo um
+        // minuto de ajuste em vez de um dia inteiro
+        salvarEstado ("batimento");
 
         // Alerta antecipado: se a memoria dobrar em relacao ao arranque, algo
         // esta vazando e vale saber ANTES de a mesa morrer.

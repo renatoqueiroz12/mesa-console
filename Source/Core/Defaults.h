@@ -33,6 +33,7 @@ struct Defaults
     static constexpr float kWideDelayMs  = 3000.0f; // silencio antes de voltar ao BG
     static constexpr float kMinShotMs    = 1500.0f; // evita pingue-pongue
     static constexpr float kManualHoldMs = 5000.0f;
+    static constexpr float kMultiTalkMs  = 1500.0f; // conversa cruzada -> plano aberto
     static constexpr float kDominanceDb  =   6.0f;
 
     // ---- nivelador de fader
@@ -91,6 +92,7 @@ inline void resetAutomation (MixerEngine& mix)
     A.minShotMs   .store (Defaults::kMinShotMs);
     A.wideDelayMs .store (Defaults::kWideDelayMs);
     A.manualHoldMs.store (Defaults::kManualHoldMs);
+    A.multiTalkMs .store (Defaults::kMultiTalkMs);
 }
 
 /** Tudo: todos os canais e a automacao. */

@@ -21,6 +21,13 @@ struct AutomationParams
     /** Quanto um corte MANUAL (botao de teste, comando externo) segura o plano
         antes de a automacao poder voltar ao padrao. */
     std::atomic<float> manualHoldMs { 5000.0f };
+
+    /** Conversa cruzada: quando DUAS ou mais fontes falam ao mesmo tempo por
+        este tempo, a mesa vai para o plano aberto em vez de ficar escolhendo
+        entre elas. Zero desliga a regra. */
+    std::atomic<float> multiTalkMs { 1500.0f };
+    /** Para onde ir na conversa cruzada. Zero = usa a camera padrao (BG). */
+    std::atomic<int>   multiTalkCamera { 0 };
 };
 
 struct BusParams
