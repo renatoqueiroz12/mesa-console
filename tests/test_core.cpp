@@ -1158,6 +1158,11 @@ int main()
         check (autom.camera() == 5, "conversa cruzada sustentada vai ao plano aberto");
         run (3.0, false, true);
         check (autom.camera() == 3, "terminada a conversa, quem segue falando reassume");
+
+        // desligada, a regra nao pode agir
+        mix.automation.multiTalkEnabled.store (false);
+        run (4.0, true, true);
+        check (autom.camera() != 5, "desligada, a conversa cruzada nao leva ao plano aberto");
     }
 
 

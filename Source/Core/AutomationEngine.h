@@ -235,8 +235,9 @@ public:
         // Exige permanencia propria porque sobreposicao curta e normal na fala
         // — alguem concorda, ri, completa a frase do outro. So vira conversa
         // cruzada quando se sustenta.
-        const float multiMs = A.multiTalkMs.load (std::memory_order_relaxed);
-        if (numFalando >= 2)
+        const float multiMs = A.multiTalkEnabled.load (std::memory_order_relaxed)
+                                  ? A.multiTalkMs.load (std::memory_order_relaxed) : 0.0f;
+        if (multiMs > 0.0f && numFalando >= 2)
         {
             if (multiTalkSince < 0.0) multiTalkSince = timeMs;
         }

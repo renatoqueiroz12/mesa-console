@@ -8,8 +8,8 @@
     conferir arquivo por arquivo. */
 namespace mesa {
 
-inline constexpr const char* kVersion   = "1.6.33";
-inline constexpr const char* kBuildName = "conversa cruzada vai ao plano aberto";
+inline constexpr const char* kVersion   = "1.6.34";
+inline constexpr const char* kBuildName = "chave para desligar a conversa cruzada";
 inline constexpr const char* kBuildDate = __DATE__;
 
 } // namespace mesa

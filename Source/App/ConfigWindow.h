@@ -1088,12 +1088,15 @@ private:
         dbSlider (*p, "Dominancia (dB)", mix.automation.dominanceDb.load(), 0.0f, 20.0f,
                   [this] (float v) { mix.automation.dominanceDb.store (v); });
 
+        toggle (*p, "Conversa cruzada", mix.automation.multiTalkEnabled.load(),
+                [this] (bool v) { mix.automation.multiTalkEnabled.store (v); });
+
         auto* multi = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight);
         multi->setRange (0.0, 10000.0, 100.0);
         multi->setValue (mix.automation.multiTalkMs.load(), juce::dontSendNotification);
         multi->onValueChange = [this, multi]
         { mix.automation.multiTalkMs.store (float (multi->getValue())); };
-        p->addRow ("Conversa cruzada (ms)", multi);
+        p->addRow ("Tempo para reconhecer (ms)", multi);
 
         auto* multiCam = new juce::ComboBox();
         multiCam->addItem ("usar a camera padrao", 1);
@@ -1116,8 +1119,9 @@ private:
         p->addNote ("Quando DUAS ou mais pessoas falam ao mesmo tempo por esse tempo, "
                     "a mesa vai para o plano aberto em vez de ficar escolhendo entre "
                     "elas. Sobreposicao curta e normal na fala — alguem concorda, ri, "
-                    "completa a frase — por isso ha permanencia propria. Zero desliga. "
-                    "Terminada a conversa, quem continuar falando reassume a camera.");
+                    "completa a frase — por isso ha permanencia propria. "
+                    "Terminada a conversa, quem continuar falando reassume a camera. "
+                    "Desligada, a mesa segue escolhendo entre quem fala mais alto.");
 
         auto* minShot = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight);
         minShot->setRange (200.0, 15000.0, 50.0);

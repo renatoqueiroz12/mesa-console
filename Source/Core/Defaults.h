@@ -92,6 +92,7 @@ inline void resetAutomation (MixerEngine& mix)
     A.minShotMs   .store (Defaults::kMinShotMs);
     A.wideDelayMs .store (Defaults::kWideDelayMs);
     A.manualHoldMs.store (Defaults::kManualHoldMs);
+    A.multiTalkEnabled.store (true);
     A.multiTalkMs .store (Defaults::kMultiTalkMs);
 }
 
