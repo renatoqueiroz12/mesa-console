@@ -1088,20 +1088,14 @@ private:
         dbSlider (*p, "Dominancia (dB)", mix.automation.dominanceDb.load(), 0.0f, 20.0f,
                   [this] (float v) { mix.automation.dominanceDb.store (v); });
 
-        auto* wideDelay = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight);
-        wideDelay->setRange (0.0, 30000.0, 100.0);
-        wideDelay->setValue (mix.automation.wideDelayMs.load(), juce::dontSendNotification);
-        wideDelay->onValueChange = [this, wideDelay]
-        { mix.automation.wideDelayMs.store (float (wideDelay->getValue())); };
-        p->addRow ("Silencio antes do BG (ms)", wideDelay);
-        p->addNote ("Quanto tempo sem ninguem falando antes de voltar ao plano geral. "
-                    "Curto demais e a mesa volta ao BG na respirada entre frases.");
-
         auto* minShot = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight);
         minShot->setRange (200.0, 15000.0, 50.0);
         minShot->setValue (mix.automation.minShotMs.load(), juce::dontSendNotification);
         minShot->onValueChange = [this, minShot] { mix.automation.minShotMs.store (float (minShot->getValue())); };
         p->addRow ("Plano minimo (ms)", minShot);
+        p->addNote ("Tempo minimo entre trocas de CAMERA. Serve contra pingue-pongue "
+                    "quando duas pessoas se alternam rapido. NAO atrasa a volta ao "
+                    "plano padrao — quem manda nisso e o hold de cada canal.");
 
         auto* wide = new juce::ComboBox();
         wide->addItem ("nenhuma (fica onde esta)", 1);
@@ -1208,6 +1202,51 @@ private:
                                          + "  (" + mesa::kBuildName + ")"));
         p->addRow ("Compilada em", makeReadOnly (std::string (mesa::kBuildDate)));
 
+        p->addTitle ("Cores da tally");
+        p->addNote ("Vermelho no ar nao e universal — cada emissora tem sua convencao. "
+                    "O texto se ajusta sozinho para contrastar com a cor escolhida.");
+        {
+            struct Item { const char* nome; unsigned* valor; };
+            static const char* nomes[] = { "No ar", "Armado", "Espera", "Parado" };
+            unsigned* alvos[] = { &settings.tallyOnAir, &settings.tallyArmed,
+                                  &settings.tallyWait,  &settings.tallyIdle };
+
+            for (int i = 0; i < 4; ++i)
+            {
+                auto* botao = new juce::TextButton ("ESCOLHER COR");
+                unsigned* alvo = alvos[i];
+                botao->setColour (juce::TextButton::buttonColourId, juce::Colour (*alvo));
+                botao->setColour (juce::TextButton::textColourOffId,
+                                  juce::Colour (*alvo).contrasting (0.9f));
+                botao->onClick = [this, alvo, botao]
+                {
+                    auto* sel = new juce::ColourSelector (juce::ColourSelector::showColourAtTop
+                                                        | juce::ColourSelector::showSliders
+                                                        | juce::ColourSelector::showColourspace);
+                    sel->setCurrentColour (juce::Colour (*alvo));
+                    sel->setSize (300, 300);
+                    // aplica ao vivo: a superficie por tras muda enquanto escolhe
+                    appliers.add (new ColourApplier (alvo, botao, [this] { applyTally(); }));
+                    sel->addChangeListener (appliers.getLast());
+                    juce::CallOutBox::launchAsynchronously (std::unique_ptr<juce::Component> (sel),
+                                                            botao->getScreenBounds(), nullptr);
+                };
+                p->addRow (nomes[i], botao, 28);
+            }
+
+            auto* padrao = new juce::TextButton ("VOLTAR AS CORES PADRAO");
+            padrao->onClick = [this]
+            {
+                settings.tallyOnAir = 0xffff3b30;
+                settings.tallyArmed = 0xffffb020;
+                settings.tallyWait  = 0xff2b3440;
+                settings.tallyIdle  = 0xff20242a;
+                applyTally();
+                rebuildTabs();
+            };
+            p->addRow ("", padrao, 28);
+        }
+
         p->addTitle ("Ajustes de fabrica");
         p->addNote ("Ponto de partida para fala de estudio: threshold -35 dBFS, "
                     "permanencia 300 ms, histerese 6 dB, hold 2500 ms, silencio antes "
@@ -1302,11 +1341,41 @@ private:
         return l;
     }
 
+    /** Leva as cores das configuracoes para a superficie. */
+    void applyTally()
+    {
+        theme::tally().onAir = juce::Colour (settings.tallyOnAir);
+        theme::tally().armed = juce::Colour (settings.tallyArmed);
+        theme::tally().wait  = juce::Colour (settings.tallyWait);
+        theme::tally().idle  = juce::Colour (settings.tallyIdle);
+    }
+
+    /** Aplica a cor enquanto o seletor esta aberto, para o operador ver o
+        efeito na mesa atras da janela em vez de escolher no escuro. */
+    struct ColourApplier : juce::ChangeListener
+    {
+        ColourApplier (unsigned* t, juce::TextButton* b, std::function<void()> aplicar)
+            : alvo (t), botao (b), onChange (std::move (aplicar)) {}
+        void changeListenerCallback (juce::ChangeBroadcaster* src) override
+        {
+            if (auto* sel = dynamic_cast<juce::ColourSelector*> (src))
+            {
+                const auto c = sel->getCurrentColour();
+                *alvo = c.getARGB();
+                botao->setColour (juce::TextButton::buttonColourId, c);
+                botao->setColour (juce::TextButton::textColourOffId, c.contrasting (0.9f));
+                if (onChange) onChange();      // reflete na mesa atras da janela
+            }
+        }
+        unsigned* alvo; juce::TextButton* botao; std::function<void()> onChange;
+    };
+
     void save()
     {
         settings.routing.masterGainDb = mix.masterGainDb.load();
         mesa::applyRouting (settings, mix);
         mesa::applyOutputs (settings.outputs, mix);
+        applyTally();
         const auto json = mesa::settingsToJson (settings);
         settingsFile.replaceWithText (json);
         statusLabel.setText ("salvo em " + settingsFile.getFileName()
@@ -1328,6 +1397,7 @@ private:
     juce::String livewireStatus { "nao consultado" };
     std::vector<VmixClient::Input> vmixInputs;
     juce::String vmixStatus { "nao consultado" };
+    juce::OwnedArray<ColourApplier> appliers;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ConfigComponent)
 };

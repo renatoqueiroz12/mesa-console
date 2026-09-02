@@ -1034,6 +1034,54 @@ int main()
         check (autom.camera() == 5, "vencido o hold, volta a camera padrao");
     }
 
+    // ---------------- o hold e o UNICO controle do retorno ao padrao
+    {
+        // Com "silencio antes do BG" alto e plano minimo alto, o retorno tem
+        // que obedecer so ao hold. Antes, o maior dos tres mandava, e mexer no
+        // hold nao mudava nada.
+        auto medir = [] (float holdMs)
+        {
+            MixerEngine mix; mix.prepare (48000.0, 256, 2);
+            AutomationEngine autom; autom.prepare (2);
+            auto& ch = mix.channel (0);
+            ch.params.inputIndex.store (0); ch.params.on.store (true);
+            ch.params.busMask.store (1);    ch.params.faderDb.store (0.0f);
+            auto& tr = ch.params.trigger;
+            tr.enabled.store (true); tr.camera.store (2); tr.thresholdDb.store (-40.0f);
+            tr.triggerMs.store (150.0f); tr.source.store (0);
+            tr.holdMs.store (holdMs); tr.releaseMs.store (400.0f);
+            mix.automation.enabled.store (true); mix.automation.testMode.store (false);
+            mix.automation.wideCamera.store (5);
+            mix.automation.wideDelayMs.store (3000.0f);   // alto de proposito
+            mix.automation.minShotMs.store (1200.0f);     // alto de proposito
+
+            std::vector<float> in (256), oL (256), oR (256);
+            const float* ins[1] = { in.data() }; float* outs[2] = { oL.data(), oR.data() };
+            double ph = 0.0; const float bms = 256.0f / 48.0f;
+            auto run = [&] (double secs, bool loud)
+            {
+                const int blocks = int (secs * 1000.0 / bms);
+                for (int b = 0; b < blocks; ++b)
+                {
+                    for (int i = 0; i < 256; ++i)
+                    { in[size_t (i)] = loud ? 0.5f * std::sin (ph) : 0.0f; ph += 0.07; }
+                    mix.process (ins, 1, outs, 2, 256);
+                    autom.processBlock (mix, bms);
+                }
+            };
+            run (3.0, true);
+            double t = 0.0;
+            while (autom.camera() != 5 && t < 15.0) { run (0.05, false); t += 0.05; }
+            return t;
+        };
+
+        const double curto = medir (800.0f);
+        const double longo = medir (5000.0f);
+        check (curto < 2.0, "hold curto devolve ao padrao rapido, apesar dos outros prazos");
+        check (longo > 5.0, "hold longo segura, apesar dos outros prazos serem menores");
+        check (longo - curto > 3.5, "mexer no hold muda o tempo na proporcao esperada");
+    }
+
 
     std::printf ("\n%s\n", failures == 0 ? "TODOS OS TESTES PASSARAM" : "HOUVE FALHAS");
     return failures;

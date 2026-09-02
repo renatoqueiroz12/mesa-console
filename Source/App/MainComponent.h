@@ -72,6 +72,11 @@ public:
         addAndMakeVisible (*layerA);
         addAndMakeVisible (*layerB);
 
+        theme::tally().onAir = juce::Colour (settings.tallyOnAir);
+        theme::tally().armed = juce::Colour (settings.tallyArmed);
+        theme::tally().wait  = juce::Colour (settings.tallyWait);
+        theme::tally().idle  = juce::Colour (settings.tallyIdle);
+
         logFile = settingsFile.getSiblingFile ("mesa.log");
         startedMs = juce::Time::getMillisecondCounterHiRes();
         logToFile (juce::String ("=== mesa iniciada ===  v") + mesa::kVersion
@@ -595,6 +600,10 @@ private:
                    + "   |   latencia " + juce::String (engine.latencyMs.load(), 2) + " ms"
                    + "   |   carga " + juce::String (engine.cpuLoad.load(), 1) + " %"
                    + "   |   cam " + juce::String (engine.automation.camera())
+                   + (engine.automation.msUntilWide (engine.mixer) > 0.0
+                          ? " (BG em " + juce::String (
+                                engine.automation.msUntilWide (engine.mixer) / 1000.0, 1) + "s)"
+                          : juce::String())
                    + "   |   layer " + juce::String (layer == 0 ? "A" : "B")
                    + "   |   enviados " + juce::String (sender->sent.load())
                    + " / falhas " + juce::String (sender->failed.load());
@@ -603,7 +612,12 @@ private:
         for (int i = 0; i < strips.size(); ++i)
         {
             const int g = layer * kFadersPerLayer + i;
-            if (g < n) strips[i]->setTriggerState (engine.automation.stateOf (g));
+            if (g < n)
+            {
+                strips[i]->setTriggerState (engine.automation.stateOf (g));
+                const int cam = engine.mixer.channel (g).params.trigger.camera.load();
+                strips[i]->setOnAir (cam > 0 && cam == engine.automation.camera());
+            }
             strips[i]->refresh();
         }
 

@@ -2,6 +2,8 @@
 #include "Json.h"
 #include "MixerEngine.h"
 #include "SourceCatalog.h"
+#include <cstdio>
+#include <cstdlib>
 #include <vector>
 #include <fstream>
 
@@ -204,6 +206,12 @@ struct Settings
     SourceCatalog catalog;
     OutputCatalog outputs;
 
+    /** Cores da tally, em ARGB. Cada emissora tem sua convencao. */
+    unsigned tallyOnAir = 0xffff3b30;
+    unsigned tallyArmed = 0xffffb020;
+    unsigned tallyWait  = 0xff2b3440;
+    unsigned tallyIdle  = 0xff20242a;
+
     /** Porta da API em XML do vMix, usada so para LISTAR as entradas.
         Diferente da 8099, que e por onde os comandos saem. */
     int vmixApiPort = 8088;
@@ -369,6 +377,16 @@ inline std::string settingsToJson (const Settings& s)
     p.set ("vst3Path",         text (s.dsp.vst3Path));
     root.set ("dsp", p);
 
+    auto hex = [] (unsigned v)
+    {
+        char b[16];
+        std::snprintf (b, sizeof (b), "%08x", v);
+        return std::string (b);
+    };
+    root.set ("tallyOnAir",      text (hex (s.tallyOnAir)));
+    root.set ("tallyArmed",      text (hex (s.tallyArmed)));
+    root.set ("tallyWait",       text (hex (s.tallyWait)));
+    root.set ("tallyIdle",       text (hex (s.tallyIdle)));
     root.set ("vmixApiPort",     num (s.vmixApiPort));
     root.set ("livewireNode",    text (s.livewireNode));
     root.set ("remoteEnabled",   boolean (s.remoteEnabled));
@@ -512,6 +530,15 @@ inline bool settingsFromJson (const std::string& src, Settings& out)
         out.dsp.scanOutOfProcess = p->boolean ("scanOutOfProcess", true);
         out.dsp.vst3Path         = p->string ("vst3Path");
     }
+    auto hexOr = [&root] (const char* k, unsigned def)
+    {
+        const auto v = root.string (k);
+        return v.empty() ? def : unsigned (std::stoul (v, nullptr, 16));
+    };
+    out.tallyOnAir = hexOr ("tallyOnAir", 0xffff3b30);
+    out.tallyArmed = hexOr ("tallyArmed", 0xffffb020);
+    out.tallyWait  = hexOr ("tallyWait",  0xff2b3440);
+    out.tallyIdle  = hexOr ("tallyIdle",  0xff20242a);
     out.vmixApiPort       = int (root.number ("vmixApiPort", 8088));
     out.livewireNode      = root.string ("livewireNode");
     out.remoteEnabled     = root.boolean ("remoteEnabled", true);

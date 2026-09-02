@@ -465,6 +465,9 @@ private:
         slider (*p, "Cooldown (ms)", tr.cooldownMs.load(), 0.0, 30000.0, 100.0,
                 [&tr] (float v) { tr.cooldownMs.store (v); });
 
+        p->addNote ("HOLD e o unico controle do retorno: passado esse tempo desde a "
+                    "ultima fala, a mesa volta ao plano padrao. Some o release, que e "
+                    "o tempo para encerrar a fala. Nada mais atrasa a volta.");
         p->addNote ("O trigger le o envelope rapido, nao o medidor de pico. Permanencia "
                     "separa fala de estalo de papel; HOLD e quanto a camera fica depois "
                     "que a pessoa para, e e ele que evita corte na respirada entre frases. "
@@ -600,6 +603,10 @@ private:
              + "   margem: " + (margem >= 0 ? "+" : "") + juce::String (margem, 1) + " dB"
              + "\nestado: " + mesa::triggerStateName (autom.stateOf (index))
              + "   camera no ar: " + juce::String (autom.camera())
+             + (autom.msUntilWide (mix) > 0.0
+                    ? "   volta ao padrao em "
+                      + juce::String (autom.msUntilWide (mix) / 1000.0, 1) + " s"
+                    : juce::String())
              + "\n" + motivo
              + (settings.remoteEnabled ? "" : "")
              + (mix.automation.testMode.load()

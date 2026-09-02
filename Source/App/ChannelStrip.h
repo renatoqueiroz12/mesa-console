@@ -235,6 +235,9 @@ public:
 
     void setTriggerState (mesa::TriggerState s) { trigState = s; }
 
+    /** Ligada pela superficie: a camera deste canal e a que esta no ar. */
+    void setOnAir (bool v) { onAir = v; }
+
     void paint (juce::Graphics& g) override
     {
         theme::drawPanel (g, getLocalBounds(), theme::surfaceHi, theme::surfaceLo);
@@ -285,24 +288,59 @@ public:
         g.drawText (theme::fmtDb (ch.params.faderDb.load()),
                     dbReadout, juce::Justification::centred, false);
 
-        // ---- lampadas: sinal presente e estado do trigger
-        auto lampRow = trigRow;
-        auto sig = lampRow.removeFromLeft (10).withSizeKeepingCentre (8, 8);
-        g.setColour (ch.presence.hasSignal() ? theme::busGreen : juce::Colour (0xff2b3038));
-        g.fillEllipse (sig.toFloat());
+        // ---- TALLY: como a luz de uma mesa de corte.
+        //
+        // Aqui morava um par de lampadas — presenca de sinal e estado do
+        // trigger. A de sinal era redundante: os medidores logo acima dizem a
+        // mesma coisa com mais precisao. O que faltava era a informacao que o
+        // operador procura de relance: QUEM esta no ar.
+        //
+        // Vermelho: a camera deste canal esta no ar agora.
+        // Ambar: o trigger armou e disputa o corte, mas ainda nao e dele.
+        // Apagado: parado.
+        const bool armed = trigState == mesa::TriggerState::Active
+                        || trigState == mesa::TriggerState::Candidate;
 
-        lampRow.removeFromLeft (5);
-        auto tl = lampRow.removeFromLeft (10).withSizeKeepingCentre (8, 8);
-        g.setColour (trigColour());
-        g.fillEllipse (tl.toFloat());
+        auto bar = trigRow.toFloat();
+        juce::Colour fill = theme::tally().idle;
+        juce::Colour ink  = theme::textDim;
+        juce::String txt;
 
-        lampRow.removeFromLeft (5);
-        g.setColour (theme::textDim);
-        g.setFont (theme::mono (9.0f));
-        g.drawText (trigState == mesa::TriggerState::Idle
-                        ? juce::String ("-") : juce::String (mesa::triggerStateName (trigState)),
-                    lampRow,
-                    juce::Justification::centredLeft, false);
+        if (onAir)
+        {
+            fill = theme::tally().onAir;
+            ink  = fill.contrasting (0.9f);
+            txt  = cam > 0 ? "NO AR  " + juce::String (cam) : juce::String ("NO AR");
+        }
+        else if (armed)
+        {
+            fill = theme::tally().armed;
+            ink  = fill.contrasting (0.9f);
+            txt  = trigState == mesa::TriggerState::Active ? "PRONTO" : "OUVINDO";
+        }
+        else if (trigState == mesa::TriggerState::Cooldown)
+        {
+            fill = theme::tally().wait;
+            txt  = "ESPERA";
+        }
+        else if (ch.params.trigger.enabled.load())
+        {
+            txt = cam > 0 ? "CAM " + juce::String (cam) : juce::String ("SEM CAM");
+        }
+
+        g.setColour (fill);
+        g.fillRoundedRectangle (bar, 3.0f);
+        if (onAir)
+        {
+            g.setColour (theme::tally().onAir.withAlpha (0.35f));
+            g.drawRoundedRectangle (bar.expanded (1.5f), 4.0f, 2.0f);   // brilho
+        }
+        g.setColour (juce::Colours::black.withAlpha (0.45f));
+        g.drawRoundedRectangle (bar, 3.0f, 1.0f);
+
+        g.setColour (ink);
+        g.setFont (theme::mono (9.5f, onAir));
+        g.drawText (txt, trigRow, juce::Justification::centred, false);
     }
 
     void resized() override
@@ -334,7 +372,7 @@ public:
         r.removeFromTop (6);
 
         // de baixo para cima: trigger, ON/OFF, leitura. O resto e do fader.
-        trigRow = r.removeFromBottom (16);
+        trigRow = r.removeFromBottom (18);
         r.removeFromBottom (5);
         auto onoff = r.removeFromBottom (72);
         bigOn .setBounds (onoff.removeFromTop (35));
@@ -379,16 +417,6 @@ private:
         }
     }
 
-    juce::Colour trigColour() const
-    {
-        switch (trigState)
-        {
-            case mesa::TriggerState::Active:    return theme::trig;
-            case mesa::TriggerState::Candidate: return theme::prev;
-            case mesa::TriggerState::Cooldown:  return theme::wide.withAlpha (0.55f);
-            default:                            return juce::Colour (0xff2b3038);
-        }
-    }
 
     mesa::Channel& ch;
     int index;
@@ -397,6 +425,7 @@ private:
     FaderComponent fader;
     juce::Rectangle<int> oledArea, meterArea, dbReadout, trigRow;
     mesa::TriggerState trigState = mesa::TriggerState::Idle;
+    bool onAir = false;
     float lastFaderDb = -1000.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ChannelStrip)

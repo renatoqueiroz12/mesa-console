@@ -1,5 +1,6 @@
 #pragma once
 #include "TriggerEngine.h"
+#include <algorithm>
 #include "MixerEngine.h"
 #include <array>
 #include <memory>
@@ -83,6 +84,19 @@ public:
 
     /** Relogio interno, para quem precisa marcar prazo de suspensao. */
     double nowMs() const noexcept { return timeMs; }
+
+    /** Quanto falta para voltar ao plano padrao, em ms. Zero quando ja voltou
+        ou quando alguem ainda esta falando. Existe para a interface poder
+        MOSTRAR a contagem: sem isso o operador acha que travou. */
+    double msUntilWide (const MixerEngine& mix) const noexcept
+    {
+        const auto& A = mix.automation;
+        if (A.wideCamera.load() <= 0) return 0.0;
+        if (intendedCamera.load() == A.wideCamera.load()) return 0.0;
+
+        const double falta = holdUntilMs - timeMs;
+        return falta > 0.0 ? falta : 0.0;
+    }
 
     bool isSuspended (double atMs) const noexcept
     {
@@ -203,10 +217,17 @@ public:
         // ninguem falando: volta para a camera geral depois do silencio pedido
         const int wide = mix.automation.wideCamera.load (std::memory_order_relaxed);
         const double quietFor = timeMs - lastActiveMs;
+        // Um controle so manda no retorno: o HOLD do canal que estava no ar.
+        //
+        // Antes havia tres prazos concorrendo — hold, "silencio antes do BG" e
+        // plano minimo — e valia o maior. Na pratica isso significava mexer no
+        // hold e nada mudar, porque outro prazo maior estava mandando. Um
+        // controle que nao controla e pior que controle nenhum.
+        //
+        // O plano minimo continua existindo, mas para o que ele serve de fato:
+        // impedir pingue-pongue entre CANAIS. Nao atrasa a volta ao padrao.
         if (! quiet && ! anyActive && wide > 0 && intendedCamera.load() != wide
-            && timeMs > holdUntilMs
-            && quietFor >= A.wideDelayMs.load (std::memory_order_relaxed)
-            && timeMs - lastCutMs >= A.minShotMs.load (std::memory_order_relaxed))
+            && timeMs > holdUntilMs)
         {
             Command c;
             c.type = Command::Type::Cut; c.camera = wide; c.channel = -1;

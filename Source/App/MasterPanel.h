@@ -152,12 +152,50 @@ public:
         drawLine (g, s.removeFromTop (16), "MONITOR CR", srcName (mix.monitor.source.load()));
         drawLine (g, s.removeFromTop (16), "ESTUDIO",    srcName (studioSource));
 
-        // CAM no ar
+        // CAM no ar + contagem para o retorno ao plano padrao.
+        //
+        // A contagem existe porque "ele demora para voltar" e uma queixa sem
+        // investigacao possivel: o operador nao sabe se sao 3 ou 8 segundos,
+        // nem qual dos tres prazos esta segurando. Vendo o numero correr, a
+        // pergunta deixa de ser "travou?" e vira "qual ajuste encurto?".
         theme::drawOled (g, camBox);
-        g.setColour (autom.camera() > 0 ? theme::onRed : theme::oledDim);
+
+        const double faltaMs = autom.msUntilWide (mix);
+        const int camNoAr = autom.camera();
+
+        auto cb = camBox.reduced (10, 6);
+        auto contagem = faltaMs > 0.0 ? cb.removeFromRight (96) : juce::Rectangle<int>();
+
+        g.setColour (camNoAr > 0 ? theme::onRed : theme::oledDim);
         g.setFont (theme::mono (26.0f, true));
-        g.drawText ("CAM " + juce::String (autom.camera()), camBox,
-                    juce::Justification::centred, false);
+        g.drawText ("CAM " + juce::String (camNoAr), cb,
+                    faltaMs > 0.0 ? juce::Justification::centredLeft
+                                  : juce::Justification::centred, false);
+
+        if (faltaMs > 0.0)
+        {
+            const double total = juce::jmax (1.0, double (
+                juce::jmax (mix.automation.wideDelayMs.load(),
+                            mix.automation.minShotMs.load())));
+            const float restante = float (juce::jlimit (0.0, 1.0, faltaMs / total));
+
+            g.setColour (theme::oledDim);
+            g.setFont (theme::mono (8.0f));
+            g.drawText ("VOLTA EM", contagem.removeFromTop (10),
+                        juce::Justification::centredRight, false);
+
+            g.setColour (theme::prev);
+            g.setFont (theme::mono (20.0f, true));
+            g.drawText (juce::String (faltaMs / 1000.0, 1) + "s",
+                        contagem.removeFromTop (22), juce::Justification::centredRight, false);
+
+            // barra que esvazia: da a nocao de quanto falta sem ler numero
+            auto barra = contagem.removeFromTop (5).toFloat();
+            g.setColour (juce::Colour (0xff0a1116));
+            g.fillRect (barra);
+            g.setColour (theme::prev.withAlpha (0.85f));
+            g.fillRect (barra.withWidth (barra.getWidth() * restante));
+        }
     }
 
     void resized() override
@@ -195,7 +233,7 @@ public:
         r.removeFromTop (8);
 
         title3 = r.removeFromTop (14);
-        camBox = r.removeFromTop (52);
+        camBox = r.removeFromTop (56);
         r.removeFromTop (6);
         autoBtn->setBounds (r.removeFromTop (28));
     }

@@ -47,6 +47,24 @@ namespace theme
     inline const juce::Colour capTop     { 0xffb9c1cb };
     inline const juce::Colour capBot     { 0xff6f7883 };
 
+    // ---------------------------------------------------------------- tally
+    // Ajustaveis: cada emissora tem sua convencao de cor, e vermelho no ar nao
+    // e universal. Ficam em variaveis, nao em constantes, para a configuracao
+    // poder trocar sem recompilar.
+    struct TallyColours
+    {
+        juce::Colour onAir  { 0xffff3b30 };   // camera deste canal no ar
+        juce::Colour armed  { 0xffffb020 };   // trigger armado, disputando
+        juce::Colour wait   { 0xff2b3440 };   // cooldown
+        juce::Colour idle   { 0xff20242a };   // parado
+    };
+
+    inline TallyColours& tally()
+    {
+        static TallyColours t;
+        return t;
+    }
+
     inline juce::Font mono (float h, bool bold = false)
     {
         return juce::Font (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), h,
