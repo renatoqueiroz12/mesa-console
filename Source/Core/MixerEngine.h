@@ -25,6 +25,11 @@ struct AutomationParams
     /** Conversa cruzada: quando DUAS ou mais fontes falam ao mesmo tempo por
         este tempo, a mesa vai para o plano aberto em vez de ficar escolhendo
         entre elas. Zero desliga a regra. */
+    /** Quem fala pode interromper a camera padrao antes de ela cumprir o plano
+        minimo. Ligado, o corte sai na hora — bom para debate. Desligado, o
+        plano geral respira o tempo minimo antes de ser trocado. */
+    std::atomic<bool>  geralInterrompivel { true };
+
     std::atomic<bool>  multiTalkEnabled { true };
     std::atomic<float> multiTalkMs { 1500.0f };
     /** Para onde ir na conversa cruzada. Zero = usa a camera padrao (BG). */

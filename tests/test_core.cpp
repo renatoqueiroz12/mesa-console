@@ -1219,6 +1219,22 @@ int main()
 
         run (0.6, true, false);
         check (autom.camera() == 2, "com a geral no ar, quem fala assume sem esperar");
+
+        // Com a interrupcao DESLIGADA, a geral cumpre o plano minimo.
+        // O plano minimo sobe para 8 s para que a espera seja mensuravel logo
+        // depois de a geral entrar — com 1,5 s ela ja teria vencido.
+        mix.automation.minShotMs.store (8000.0f);
+        mix.automation.geralInterrompivel.store (false);
+        run (6.0, false, false);
+        check (autom.camera() == 5, "volta ao plano padrao");
+
+        run (1.0, true, false);
+        check (autom.camera() == 5, "desligada a interrupcao, a geral segura o tempo minimo");
+
+        // religada, o corte sai na hora mesmo com o plano minimo correndo
+        mix.automation.geralInterrompivel.store (true);
+        run (0.5, true, false);
+        check (autom.camera() == 2, "religada a interrupcao, quem fala assume na hora");
     }
 
 

@@ -1088,6 +1088,14 @@ private:
         dbSlider (*p, "Dominancia (dB)", mix.automation.dominanceDb.load(), 0.0f, 20.0f,
                   [this] (float v) { mix.automation.dominanceDb.store (v); });
 
+        toggle (*p, "Fala interrompe o plano geral",
+                mix.automation.geralInterrompivel.load(),
+                [this] (bool v) { mix.automation.geralInterrompivel.store (v); });
+        p->addNote ("Ligado: com a camera padrao no ar, quem comeca a falar assume na "
+                    "hora, sem esperar o plano minimo. Desligado: o plano geral cumpre "
+                    "o tempo minimo antes de ser trocado — corta menos, mas alguem pode "
+                    "falar um instante com a geral no ar.");
+
         toggle (*p, "Conversa cruzada", mix.automation.multiTalkEnabled.load(),
                 [this] (bool v) { mix.automation.multiTalkEnabled.store (v); });
 

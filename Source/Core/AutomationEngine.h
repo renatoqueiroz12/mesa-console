@@ -244,7 +244,8 @@ public:
         // corrigir sozinho em vez de depender de acertar o instante exato.
         const bool bloqueado = timeMs - lastCutMs
                              < double (A.minShotMs.load (std::memory_order_relaxed));
-        const bool naGeral = wide > 0 && intendedCamera.load() == wide;
+        const bool naGeral = wide > 0 && intendedCamera.load() == wide
+                          && A.geralInterrompivel.load (std::memory_order_relaxed);
 
         // SO camera confirmada: candidato ainda nao passou da permanencia, e
         // cortar por candidato desfaria o filtro que separa fala de estalo.
@@ -496,7 +497,8 @@ private:
         // sentido bloquear: alguem esta no ar falando enquanto a mesa mostra a
         // geral, que e o pior resultado possivel.
         const int wide = A.wideCamera.load (std::memory_order_relaxed);
-        const bool saindoDaGeral = wide > 0 && intendedCamera.load() == wide;
+        const bool saindoDaGeral = wide > 0 && intendedCamera.load() == wide
+                                && A.geralInterrompivel.load (std::memory_order_relaxed);
 
         if (! saindoDaGeral
             && timeMs - lastCutMs < A.minShotMs.load (std::memory_order_relaxed))
