@@ -160,19 +160,46 @@ public:
         // pergunta deixa de ser "travou?" e vira "qual ajuste encurto?".
         theme::drawOled (g, camBox);
 
+        // Duas esperas diferentes, e o operador precisa distinguir:
+        //   volta ao padrao  = quanto falta para a mesa ir ao plano padrao
+        //   bloqueio          = quanto falta para QUALQUER corte poder sair
+        // A segunda e a que faz o trigger ficar em PRONTO sem cortar.
         const double faltaMs = autom.msUntilWide (mix);
+        const double bloqueioMs = autom.msAtePoderCortar (mix);
         const int camNoAr = autom.camera();
 
+        const bool mostraDireita = faltaMs > 0.0 || bloqueioMs > 0.0;
         auto cb = camBox.reduced (10, 6);
-        auto contagem = faltaMs > 0.0 ? cb.removeFromRight (96) : juce::Rectangle<int>();
+        auto contagem = mostraDireita ? cb.removeFromRight (104) : juce::Rectangle<int>();
 
         g.setColour (camNoAr > 0 ? theme::onRed : theme::oledDim);
         g.setFont (theme::mono (26.0f, true));
         g.drawText ("CAM " + juce::String (camNoAr), cb,
-                    faltaMs > 0.0 ? juce::Justification::centredLeft
+                    mostraDireita ? juce::Justification::centredLeft
                                   : juce::Justification::centred, false);
 
-        if (faltaMs > 0.0)
+        if (bloqueioMs > 0.0)
+        {
+            // bloqueio tem prioridade: e ele que explica o PRONTO sem corte
+            g.setColour (theme::oledDim);
+            g.setFont (theme::mono (8.0f));
+            g.drawText ("BLOQUEIO", contagem.removeFromTop (10),
+                        juce::Justification::centredRight, false);
+
+            g.setColour (theme::trig);
+            g.setFont (theme::mono (20.0f, true));
+            g.drawText (juce::String (bloqueioMs / 1000.0, 1) + "s",
+                        contagem.removeFromTop (22), juce::Justification::centredRight, false);
+
+            const double total = juce::jmax (1.0, double (mix.automation.minShotMs.load()));
+            auto barra = contagem.removeFromTop (5).toFloat();
+            g.setColour (juce::Colour (0xff0a1116));
+            g.fillRect (barra);
+            g.setColour (theme::trig.withAlpha (0.85f));
+            g.fillRect (barra.withWidth (barra.getWidth()
+                            * float (juce::jlimit (0.0, 1.0, bloqueioMs / total))));
+        }
+        else if (faltaMs > 0.0)
         {
             const double total = juce::jmax (1.0, double (
                 juce::jmax (mix.automation.wideDelayMs.load(),

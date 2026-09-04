@@ -91,6 +91,26 @@ public:
     /** Ha dois ou mais falando agora. */
     bool emConversaCruzada() const noexcept { return multiTalkSince >= 0.0; }
 
+    /** Quanto falta para o proximo corte poder sair, por causa do plano minimo.
+
+        Existe porque a espera era invisivel: o trigger armava, a tally dizia
+        PRONTO e nada acontecia por um tempo. Sem ver o relogio, parece defeito.
+        Quando a camera padrao acabou de entrar, este contador esta cheio — e e
+        justamente ai que a espera mais incomoda. */
+    double msAtePoderCortar (const MixerEngine& mix) const noexcept
+    {
+        const double falta = double (mix.automation.minShotMs.load()) - (timeMs - lastCutMs);
+        return falta > 0.0 ? falta : 0.0;
+    }
+
+    /** Quanto falta no cooldown daquele canal. */
+    double msCooldown (const MixerEngine& mix, int canal) const noexcept
+    {
+        if (canal < 0 || canal >= int (triggers.size())) return 0.0;
+        if (triggers[size_t (canal)]->current() != TriggerState::Cooldown) return 0.0;
+        return double (mix.channel (canal).params.trigger.cooldownMs.load());
+    }
+
     /** Quanto falta para voltar ao plano padrao, em ms. Zero quando ja voltou
         ou quando alguem ainda esta falando. Existe para a interface poder
         MOSTRAR a contagem: sem isso o operador acha que travou. */
@@ -147,7 +167,8 @@ public:
         }
 
         bool anyActive = false;
-        int  activeCamera = 0;
+        int  activeCamera = 0;        // inclui candidato: serve para o hold
+        int  camConfirmada = 0;       // SO quem passou da permanencia
         float activeHoldMs = 0.0f;
         int  numFalando = 0;
 
@@ -169,7 +190,12 @@ public:
              || triggers[size_t (i)]->current() == TriggerState::Candidate)
             {
                 anyActive = true;
-                if (triggers[size_t (i)]->current() == TriggerState::Active) ++numFalando;
+                if (triggers[size_t (i)]->current() == TriggerState::Active)
+                {
+                    ++numFalando;
+                    if (camConfirmada == 0)
+                        camConfirmada = ch.params.trigger.camera.load (std::memory_order_relaxed);
+                }
                 if (activeCamera == 0)
                 {
                     activeCamera = ch.params.trigger.camera.load (std::memory_order_relaxed);
@@ -203,28 +229,45 @@ public:
                 holdUntilMs = timeMs + double (activeHoldMs);
         }
 
-        // Volta da suspensao: o corte normal so acontece na BORDA do trigger.
-        // Se a pessoa ja estava falando durante o VT, nao ha borda nova — e a
-        // mesa ficaria no BG com o locutor no ar. Aqui ela reavalia uma vez.
-        if (wasQuiet && ! quiet && anyActive && activeCamera > 0
-            && intendedCamera.load() != activeCamera)
+        const int wide = A.wideCamera.load (std::memory_order_relaxed);
+
+        // REAVALIACAO CONTINUA.
+        //
+        // O corte so nascia na BORDA do trigger. Se naquele instante alguma
+        // regra bloqueava — plano minimo, quase sempre —, o disparo era
+        // descartado e nunca mais tentado: a pessoa seguia falando e a mesa
+        // ficava na geral. Tambem faltava borda ao voltar de VT e ao sair de
+        // conversa cruzada, e cada caso desses virou um remendo separado.
+        //
+        // Uma regra so resolve os tres: se ha alguem falando, a camera dele nao
+        // esta no ar e nada bloqueia agora, corta. O sistema passa a se
+        // corrigir sozinho em vez de depender de acertar o instante exato.
+        const bool bloqueado = timeMs - lastCutMs
+                             < double (A.minShotMs.load (std::memory_order_relaxed));
+        const bool naGeral = wide > 0 && intendedCamera.load() == wide;
+
+        // SO camera confirmada: candidato ainda nao passou da permanencia, e
+        // cortar por candidato desfaria o filtro que separa fala de estalo.
+        if (! quiet && camConfirmada > 0
+            && intendedCamera.load() != camConfirmada
+            && (naGeral || ! bloqueado)
+            && multiTalkSince < 0.0)
         {
             Command c;
-            c.type = Command::Type::Cut; c.camera = activeCamera; c.channel = -1;
+            c.type = Command::Type::Cut; c.camera = camConfirmada; c.channel = -1;
             c.simulated = A.testMode.load (std::memory_order_relaxed);
             c.timeMs = timeMs;
             if (A.enabled.load (std::memory_order_relaxed))
             {
                 commands.push (c);
-                intendedCamera.store (activeCamera);
-                if (! c.simulated) liveCamera.store (activeCamera);
+                intendedCamera.store (camConfirmada);
+                if (! c.simulated) liveCamera.store (camConfirmada);
                 lastCutMs = timeMs;
             }
         }
         wasQuiet = quiet;
 
         // ninguem falando: volta para a camera geral depois do silencio pedido
-        const int wide = mix.automation.wideCamera.load (std::memory_order_relaxed);
         const double quietFor = timeMs - lastActiveMs;
         // ---- conversa cruzada: dois ou mais falando ao mesmo tempo
         //
@@ -448,7 +491,15 @@ private:
         if (! A.enabled.load (std::memory_order_relaxed)) return;
         if (ev.camera <= 0) return;
 
-        if (timeMs - lastCutMs < A.minShotMs.load (std::memory_order_relaxed))
+        // O plano minimo existe para evitar corta-corta ENTRE cameras de canal.
+        // Sair do plano geral para quem esta falando e o caso em que menos faz
+        // sentido bloquear: alguem esta no ar falando enquanto a mesa mostra a
+        // geral, que e o pior resultado possivel.
+        const int wide = A.wideCamera.load (std::memory_order_relaxed);
+        const bool saindoDaGeral = wide > 0 && intendedCamera.load() == wide;
+
+        if (! saindoDaGeral
+            && timeMs - lastCutMs < A.minShotMs.load (std::memory_order_relaxed))
         {
             ignored.fetch_add (1, std::memory_order_relaxed);
             pushEvent (ev);                      // vira linha de log, nao vira corte

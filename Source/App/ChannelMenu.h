@@ -603,6 +603,11 @@ private:
              + "   margem: " + (margem >= 0 ? "+" : "") + juce::String (margem, 1) + " dB"
              + "\nestado: " + mesa::triggerStateName (autom.stateOf (index))
              + "   camera no ar: " + juce::String (autom.camera())
+             + (autom.msAtePoderCortar (mix) > 0.0
+                    ? "\nAGUARDANDO PLANO MINIMO: faltam "
+                      + juce::String (autom.msAtePoderCortar (mix) / 1000.0, 1)
+                      + " s para qualquer corte poder sair"
+                    : juce::String())
              + (autom.msUntilWide (mix) > 0.0
                     ? "   volta ao padrao em "
                       + juce::String (autom.msUntilWide (mix) / 1000.0, 1) + " s"

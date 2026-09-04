@@ -1165,6 +1165,62 @@ int main()
         check (autom.camera() != 5, "desligada, a conversa cruzada nao leva ao plano aberto");
     }
 
+    // ------- quem fala assume a camera mesmo com prazos correndo
+    {
+        // O corte so nascia na borda do trigger: bloqueado naquele instante
+        // pelo plano minimo, era descartado e nunca mais tentado — a pessoa
+        // seguia falando com a geral no ar. Aqui o plano minimo esta alto de
+        // proposito, para provar que a reavaliacao continua resolve.
+        MixerEngine mix; mix.prepare (48000.0, 256, 3);
+        AutomationEngine autom; autom.prepare (3);
+        for (int i = 0; i < 2; ++i)
+        {
+            auto& c = mix.channel (i);
+            c.params.inputIndex.store (i); c.params.on.store (true);
+            c.params.busMask.store (1);    c.params.faderDb.store (0.0f);
+            auto& t = c.params.trigger;
+            t.enabled.store (true); t.camera.store (2 + i); t.thresholdDb.store (-40.0f);
+            t.triggerMs.store (300.0f); t.source.store (0);
+            t.holdMs.store (4000.0f); t.releaseMs.store (400.0f);
+            t.cooldownMs.store (1000.0f);
+        }
+        mix.automation.enabled.store (true);  mix.automation.testMode.store (false);
+        mix.automation.wideCamera.store (5);
+        mix.automation.minShotMs.store (1500.0f);
+        mix.automation.multiTalkEnabled.store (false);
+
+        std::vector<float> a (256), b (256), oL (256), oR (256);
+        const float* ins[2] = { a.data(), b.data() }; float* outs[2] = { oL.data(), oR.data() };
+        double p1 = 0.0, p2 = 0.0; const float bms = 256.0f / 48.0f;
+        auto run = [&] (double secs, bool f1, bool f2)
+        {
+            const int n = int (secs * 1000.0 / bms);
+            for (int k = 0; k < n; ++k)
+            {
+                for (int i = 0; i < 256; ++i)
+                {
+                    a[size_t (i)] = f1 ? 0.5f * std::sin (p1) : 0.0f; p1 += 0.07;
+                    b[size_t (i)] = f2 ? 0.5f * std::sin (p2) : 0.0f; p2 += 0.05;
+                }
+                mix.process (ins, 2, outs, 2, 256);
+                autom.processBlock (mix, bms);
+            }
+        };
+
+        run (2.0, true, false);
+        check (autom.camera() == 2, "primeiro a falar assume");
+
+        run (0.3, false, false);
+        run (1.5, false, true);
+        check (autom.camera() == 3, "outro assume mesmo com o hold do primeiro correndo");
+
+        run (5.0, false, false);
+        check (autom.camera() == 5, "silencio devolve ao plano padrao");
+
+        run (0.6, true, false);
+        check (autom.camera() == 2, "com a geral no ar, quem fala assume sem esperar");
+    }
+
 
     std::printf ("\n%s\n", failures == 0 ? "TODOS OS TESTES PASSARAM" : "HOUVE FALHAS");
     return failures;
