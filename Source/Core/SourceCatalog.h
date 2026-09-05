@@ -32,7 +32,13 @@ struct SourceDef
     /** Canal Livewire (1..32767). Vira multicast por conta: 239.192.y.z com
         canal = y*256+z. Zero significa que esta fonte nao usa Livewire. */
     int  livewireChannel = 0;
-    int  livewireSide = 0;               // 0 = esquerdo, 1 = direito
+    int  livewireSide = 0;               // 0 = esquerdo, 1 = direito, 2 = soma
+
+    /** GPIO: qual porta e pino do no acompanham o ON/OFF deste canal.
+        Zero desliga. E o que acende a luz de ar e fecha o rele. */
+    int  gpoPorta = 0, gpoPino = 0;
+    /** Entrada que liga e desliga o canal de fora — botao de mesa, pedal. */
+    int  gpiPorta = 0, gpiPino = 0;
     int  type = int (SourceType::Line);  // define mute de monitor e mix-minus
 
     float trimDb = 0.0f;
@@ -171,6 +177,8 @@ struct OutputDef
     std::string streamName;              // nome do emissor NDI, quando for NDI
     std::string deviceName;              // placa secundaria
     std::string deviceType;              // "ASIO" ou "Windows Audio"
+    /** Canal Livewire que a mesa TRANSMITE. Zero = nao transmite. */
+    int  livewireChannel = 0;
     int  busSource = 0;                  // 0..3 = PGM 1..4, 4 = CUE, 5 = monitor, 6 = fone
 };
 
@@ -266,6 +274,10 @@ inline json::Value sourceToJson (const SourceDef& s)
     o.set ("deviceType",     json::text    (s.deviceType));
     o.set ("lwChannel",      json::num     (s.livewireChannel));
     o.set ("lwSide",         json::num     (s.livewireSide));
+    o.set ("gpoPorta",       json::num     (s.gpoPorta));
+    o.set ("gpoPino",        json::num     (s.gpoPino));
+    o.set ("gpiPorta",       json::num     (s.gpiPorta));
+    o.set ("gpiPino",        json::num     (s.gpiPino));
     o.set ("deviceChannel",  json::num     (s.deviceChannel));
     o.set ("type",           json::num     (s.type));
     o.set ("trimDb",         json::num     (s.trimDb));
@@ -301,6 +313,10 @@ inline SourceDef sourceFromJson (const json::Value& o)
     s.deviceType     = o.string  ("deviceType");
     s.livewireChannel = int (o.number ("lwChannel", 0));
     s.livewireSide    = int (o.number ("lwSide", 0));
+    s.gpoPorta        = int (o.number ("gpoPorta", 0));
+    s.gpoPino         = int (o.number ("gpoPino", 0));
+    s.gpiPorta        = int (o.number ("gpiPorta", 0));
+    s.gpiPino         = int (o.number ("gpiPino", 0));
     s.deviceChannel  = int (o.number ("deviceChannel", 0));
     s.type           = int (o.number ("type", double (int (SourceType::Line))));
     s.trimDb         = float (o.number ("trimDb", 0.0));
@@ -352,6 +368,7 @@ inline json::Value outputsToJson (const OutputCatalog& c)
         v.set ("stream", json::text (o.streamName));
         v.set ("device", json::text (o.deviceName));
         v.set ("deviceType", json::text (o.deviceType));
+        v.set ("lwChannel", json::num (o.livewireChannel));
         v.set ("bus",    json::num  (o.busSource));
         a.arr.push_back (v);
     }
@@ -372,6 +389,7 @@ inline void outputsFromJson (const json::Value& a, OutputCatalog& c)
         o.streamName = v.string ("stream");
         o.deviceName = v.string ("device");
         o.deviceType = v.string ("deviceType");
+        o.livewireChannel = int (v.number ("lwChannel", 0));
         o.busSource  = int (v.number ("bus", 0));
         c.outputs.push_back (o);
     }

@@ -30,6 +30,9 @@ namespace theme
     inline const juce::Colour oled      { 0xff8fe3ff };
     inline const juce::Colour oledDim   { 0xff2b6d85 };
     inline const juce::Colour onRed     { 0xffff3b30 };
+    /** OFF aceso em laranja: distingue do ON vermelho a distancia, sem exigir
+        leitura do texto. */
+    inline const juce::Colour offLaranja { 0xffff8c1a };
     inline const juce::Colour prev      { 0xffffb020 };
     inline const juce::Colour busGreen  { 0xff54d07f };
     inline const juce::Colour trig      { 0xffff2d78 };
@@ -43,9 +46,16 @@ namespace theme
     inline const juce::Colour btnBotDown { 0xff525a65 };
     inline const juce::Colour btnText    { 0xffdfe5ec };
 
-    // Cap do fader: claro sobre a fenda preta.
-    inline const juce::Colour capTop     { 0xffb9c1cb };
-    inline const juce::Colour capBot     { 0xff6f7883 };
+    // Cap do fader: cor propria, para destacar do corpo cinza da mesa. O olho
+    // acha o fader antes de ler qualquer numero.
+    inline const juce::Colour capTop     { 0xff4a6b96 };
+    inline const juce::Colour capBot     { 0xff22354d };
+    inline const juce::Colour capRisco   { 0xffdfe7f2 };
+
+    // Escala do fader: precisa ser LIDA, nao adivinhada. Estava cinza sobre
+    // preto, quase invisivel a distancia de operacao.
+    inline const juce::Colour escalaTexto { 0xffd6dde6 };
+    inline const juce::Colour escalaTraco { 0xff97a3b2 };
 
     // ---------------------------------------------------------------- tally
     // Ajustaveis: cada emissora tem sua convencao de cor, e vermelho no ar nao
@@ -120,24 +130,114 @@ namespace theme
             g.fillRect (x, r.getY(), 2.0f, r.getHeight());
     }
 
-    /** dBFS -> 0..1 na escala de -60 a 0. */
+    /** dBFS -> 0..1 na escala de -60 a 0. Usada pelas barras horizontais. */
     inline float dbToNorm (float db) noexcept
     {
         return juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f);
     }
 
-    /** Posicao do fader (0..1) -> dB. Topo = +10, fundo = -infinito. */
+    // Curso do fader: topo +20 dB. Os 10 dB extras acima da unidade dao margem
+    // de mixagem para fonte fraca sem precisar mexer no trim no meio do ar.
+    inline constexpr float kFaderTopDb    =  20.0f;
+    inline constexpr float kFaderBottomDb = -60.0f;
+    inline constexpr float kFaderSpan     = kFaderTopDb - kFaderBottomDb;   // 80 dB
+
     inline float faderPosToDb (float pos) noexcept
     {
-        return pos <= 0.0f ? -100.0f : -60.0f + pos * 70.0f;
+        return pos <= 0.0f ? -100.0f : kFaderBottomDb + pos * kFaderSpan;
     }
     inline float faderDbToPos (float db) noexcept
     {
-        return db <= -60.0f ? 0.0f : juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 70.0f);
+        return db <= kFaderBottomDb ? 0.0f
+                                    : juce::jlimit (0.0f, 1.0f, (db - kFaderBottomDb) / kFaderSpan);
+    }
+
+    // ------------------------------------------------------- escala do medidor
+    //
+    // Os medidores nao falam em dBFS: falam na escala de OPERACAO, com 0 no
+    // nivel nominal. E o que o operador de radio le a vida inteira — e o que
+    // torna "verde ate 0, amarelo ate +10, vermelho acima" uma regra util em
+    // vez de decoracao.
+    //
+    // Referencia: 0 na escala = -20 dBFS. Assim +20 cai exatamente no teto
+    // digital, e estourar a escala significa estourar de verdade.
+    inline constexpr float kMeterRefDb  = -20.0f;   // 0 da escala, em dBFS
+    inline constexpr float kMeterTopVu  =  20.0f;   // topo da escala
+    inline constexpr float kMeterBotVu  = -40.0f;   // fundo da escala
+
+    inline float dbfsToVu (float dbfs) noexcept { return dbfs - kMeterRefDb; }
+
+    /** Posicao 0..1 do medidor a partir do nivel em dBFS. */
+    inline float meterNorm (float dbfs) noexcept
+    {
+        const float vu = dbfsToVu (dbfs);
+        return juce::jlimit (0.0f, 1.0f, (vu - kMeterBotVu) / (kMeterTopVu - kMeterBotVu));
+    }
+
+    inline const juce::Colour meterVerde    { 0xff3ad16a };
+    inline const juce::Colour meterAmbar    { 0xffe8b23a };
+    inline const juce::Colour meterVermelho { 0xffff3b30 };
+
+    /** Cor da faixa em que aquele PONTO da escala esta.
+
+        Importa que seja por ponto e nao pela barra inteira: o medidor tem que
+        mostrar verde embaixo e ambar so no trecho que passou de 0, como faz
+        qualquer VU de mesa. Colorir tudo de ambar quando o pico chega la em
+        cima esconde onde o sinal realmente esta. */
+    inline juce::Colour meterColour (float vu) noexcept
+    {
+        if (vu >= 10.0f) return meterVermelho;
+        if (vu >= 0.0f)  return meterAmbar;
+        return meterVerde;
+    }
+
+    /** Barra HORIZONTAL na escala de operacao, colorida por segmento.
+        Mesma linguagem dos medidores de canal: verde ate 0, ambar ate +10,
+        vermelho acima. Ter duas escalas diferentes na mesma tela obrigaria o
+        operador a traduzir de cabeca. */
+    inline void drawBarVu (juce::Graphics& g, juce::Rectangle<float> r, float dbfs)
+    {
+        g.setColour (juce::Colour (0xff0a1014));
+        g.fillRect (r);
+
+        const float vu = dbfs - kMeterRefDb;
+        auto pinta = [&] (float de, float ate, juce::Colour c)
+        {
+            const float topo = juce::jmin (vu, ate);
+            if (topo <= de) return;
+            const float x1 = r.getX() + r.getWidth()
+                           * ((de   - kMeterBotVu) / (kMeterTopVu - kMeterBotVu));
+            const float x2 = r.getX() + r.getWidth()
+                           * ((topo - kMeterBotVu) / (kMeterTopVu - kMeterBotVu));
+            g.setColour (c);
+            g.fillRect (x1, r.getY(), x2 - x1, r.getHeight());
+        };
+        pinta (kMeterBotVu, 0.0f,  meterVerde);
+        pinta (0.0f, 10.0f,        meterAmbar);
+        pinta (10.0f, kMeterTopVu, meterVermelho);
+
+        // serigrafia de segmentos
+        g.setColour (juce::Colour (0xff0a1014));
+        for (float x = r.getX() + 3.0f; x < r.getRight(); x += 5.0f)
+            g.fillRect (x, r.getY(), 2.0f, r.getHeight());
+
+        // marca do 0
+        const float x0 = r.getX() + r.getWidth()
+                       * ((0.0f - kMeterBotVu) / (kMeterTopVu - kMeterBotVu));
+        g.setColour (juce::Colours::white.withAlpha (0.45f));
+        g.fillRect (x0 - 0.5f, r.getY() - 1.0f, 1.0f, r.getHeight() + 2.0f);
+    }
+
+    /** y de um valor da escala dentro de um retangulo vertical. */
+    inline float vuToY (float vu, juce::Rectangle<float> r) noexcept
+    {
+        const float t = juce::jlimit (0.0f, 1.0f,
+                            (vu - kMeterBotVu) / (kMeterTopVu - kMeterBotVu));
+        return r.getBottom() - r.getHeight() * t;
     }
     inline juce::String fmtDb (float db)
     {
-        if (db <= -59.5f) return juce::String::fromUTF8 ("-\xe2\x88\x9e");
+        if (db <= kFaderBottomDb + 0.5f) return juce::String::fromUTF8 ("-\xe2\x88\x9e");
         return (db > 0.0f ? "+" : "") + juce::String (db, 1);
     }
 }

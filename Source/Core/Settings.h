@@ -212,9 +212,18 @@ struct Settings
     unsigned tallyWait  = 0xff2b3440;
     unsigned tallyIdle  = 0xff20242a;
 
+    /** Estado do dispositivo de audio, em XML do JUCE: qual placa, taxa,
+        buffer e canais ativos. Guardado inteiro porque reconstruir isso a mao
+        a partir de campos soltos erra em detalhe e a mesa abre muda. */
+    std::string deviceState;
+
     /** Porta da API em XML do vMix, usada so para LISTAR as entradas.
         Diferente da 8099, que e por onde os comandos saem. */
     int vmixApiPort = 8088;
+
+    /** GPIO pelo LWRP: usa o mesmo no do Livewire quando vazio. */
+    bool gpioEnabled = false;
+    std::string gpioNode;
 
     /** No Axia/Livewire consultado para listar fontes (LWRP, porta 93). */
     std::string livewireNode;
@@ -387,7 +396,10 @@ inline std::string settingsToJson (const Settings& s)
     root.set ("tallyArmed",      text (hex (s.tallyArmed)));
     root.set ("tallyWait",       text (hex (s.tallyWait)));
     root.set ("tallyIdle",       text (hex (s.tallyIdle)));
+    root.set ("deviceState",     text (s.deviceState));
     root.set ("vmixApiPort",     num (s.vmixApiPort));
+    root.set ("gpioEnabled",     boolean (s.gpioEnabled));
+    root.set ("gpioNode",        text (s.gpioNode));
     root.set ("livewireNode",    text (s.livewireNode));
     root.set ("remoteEnabled",   boolean (s.remoteEnabled));
     root.set ("remoteUdpPort",   num (s.remoteUdpPort));
@@ -539,7 +551,10 @@ inline bool settingsFromJson (const std::string& src, Settings& out)
     out.tallyArmed = hexOr ("tallyArmed", 0xffffb020);
     out.tallyWait  = hexOr ("tallyWait",  0xff2b3440);
     out.tallyIdle  = hexOr ("tallyIdle",  0xff20242a);
+    out.deviceState       = root.string ("deviceState");
     out.vmixApiPort       = int (root.number ("vmixApiPort", 8088));
+    out.gpioEnabled       = root.boolean ("gpioEnabled", false);
+    out.gpioNode          = root.string ("gpioNode");
     out.livewireNode      = root.string ("livewireNode");
     out.remoteEnabled     = root.boolean ("remoteEnabled", true);
     out.remoteUdpPort     = int (root.number ("remoteUdpPort", 8890));

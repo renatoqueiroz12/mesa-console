@@ -38,7 +38,7 @@ struct Defaults
 
     // ---- nivelador de fader
     static constexpr float kAutoTargetDb =  -18.0f; // equivale ao 0 VU analogico
-    static constexpr float kAutoMaxDb    =   10.0f;
+    static constexpr float kAutoMaxDb    =   20.0f;
     static constexpr float kAutoMinDb    =  -30.0f;
     static constexpr float kAutoFloorDb  =  -45.0f; // suba se subir sozinho no silencio
     static constexpr float kAutoSpeed    =    6.0f; // 4 a 8 e a faixa util

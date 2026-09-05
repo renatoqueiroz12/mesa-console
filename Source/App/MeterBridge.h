@@ -16,12 +16,19 @@ public:
         theme::drawOled (g, rightBox);
         theme::drawOled (g, clockBox);
 
-        auto l = leftBox.reduced (11, 8);
+        // Duas linhas centradas na caixa: antes elas ficavam no topo e sobrava
+        // uma faixa morta embaixo, que so ocupava altura util da mesa.
+        auto centra = [] (juce::Rectangle<int> caixa)
+        {
+            return caixa.withSizeKeepingCentre (caixa.getWidth() - 22, 39);
+        };
+
+        auto l = centra (leftBox);
         drawRow (g, l.removeFromTop (16), "PGM 1", mix.busMeter[0].peakDb());
         l.removeFromTop (7);
         drawRow (g, l.removeFromTop (16), "PGM 2", mix.busMeter[1].peakDb());
 
-        auto r = rightBox.reduced (11, 8);
+        auto r = centra (rightBox);
         drawRow (g, r.removeFromTop (16), "PGM 3", mix.busMeter[2].peakDb());
         r.removeFromTop (7);
         drawRow (g, r.removeFromTop (16), "PGM 4", mix.busMeter[3].peakDb());
@@ -60,8 +67,7 @@ private:
 
         auto valueArea = row.removeFromRight (50);
         row.removeFromRight (9);
-        theme::drawBar (g, row.toFloat().withSizeKeepingCentre (float (row.getWidth()), 14.0f),
-                        theme::dbToNorm (db));
+        theme::drawBarVu (g, row.toFloat().withSizeKeepingCentre (float (row.getWidth()), 14.0f), db);
 
         g.setColour (theme::oled);
         g.setFont (theme::mono (12.0f));

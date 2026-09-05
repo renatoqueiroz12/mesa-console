@@ -125,6 +125,17 @@ public:
         tempo rodando. */
     const float* pull (int n) noexcept
     {
+        // Trava de seguranca: pedir mais do que o buffer comporta escreveria
+        // fora dele e corromperia memoria. Aconteceu de verdade — o
+        // transmissor Livewire puxa 240 amostras por pacote e a fila fora
+        // criada com o bloco da placa, que na UMC e 8.
+        if (n > int (scratch.size()))
+        {
+            overflowPulls.fetch_add (1, std::memory_order_relaxed);
+            n = int (scratch.size());
+        }
+        if (n <= 0) return scratch.data();
+
         connected.store (ring.used() > 0, std::memory_order_relaxed);
 
         if (! correctDrift)
@@ -183,6 +194,9 @@ public:
 
     int  underruns() const noexcept { return ring.underruns.load (std::memory_order_relaxed); }
     int  overflows() const noexcept { return ring.overflows.load (std::memory_order_relaxed); }
+    /** Quantas vezes alguem pediu mais do que a fila comporta. Diferente de
+        zero significa fila dimensionada errado por quem a criou. */
+    int  badPulls() const noexcept { return overflowPulls.load (std::memory_order_relaxed); }
     bool isConnected() const noexcept { return connected.load (std::memory_order_relaxed); }
 
     std::string name;
@@ -200,6 +214,7 @@ private:
     DriftController driftCtl;
     bool correctDrift = true;
     std::atomic<bool> lost { false };
+    std::atomic<int> overflowPulls { 0 };
     std::atomic<bool> connected { false };
 };
 

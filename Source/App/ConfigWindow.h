@@ -10,6 +10,7 @@
 #include "NdiEngine.h"
 #include "SecondaryDevices.h"
 #include "LivewireReceiver.h"
+#include "LivewireSender.h"
 #include "LwrpClient.h"
 #include "VmixClient.h"
 #include "../Core/Defaults.h"
@@ -148,7 +149,13 @@ public:
     std::function<void()> onClosed;
     ~ConfigComponent() override
     {
-        NdiEngine::instance().stopDiscovery();
+        // NAO para a descoberta aqui.
+        //
+        // Parar e religar o NDI a cada abrir e fechar desta janela era o
+        // gatilho das quedas: o log mostrou o crash no MESMO segundo de
+        // "configuracoes fechadas", com a pilha dentro da DLL do NDI. Montar e
+        // desmontar biblioteca de terceiro em plena operacao e risco sem
+        // ganho — quem desliga tudo e o encerramento da mesa.
         if (onClosed) onClosed();
     }
 
@@ -479,10 +486,14 @@ private:
         }
     }
 
-    /** Inputs: cada canal tem nome, TIPO de transporte e fonte. Escolhido o tipo,
-        a lista traz so o que aquele transporte oferece agora. */
+    /** LISTA de inputs, como a tela de Source Profiles do QOR: nome, uso e
+        fonte, uma linha cada. Abrir tudo de uma vez virava um paredao de
+        controles em que ninguem achava nada. */
     CfgPage* buildCatalog()
     {
+        if (editandoInput >= 0 && editandoInput < int (settings.catalog.sources.size()))
+            return buildInputDetail (size_t (editandoInput));
+
         auto* p = new CfgPage();
         addDeviceControls (*p);
 
@@ -505,9 +516,8 @@ private:
                         "Depois de listar, escolha a fonte no campo de cada input.");
         }
 
+
         p->addTitle ("Inputs");
-        p->addNote ("Livewire e Dante chegam como dispositivo criado pelo driver deles; "
-                    "estao separados aqui so para facilitar achar. NDI vem da rede.");
 
         auto* add = new juce::TextButton ("ADICIONAR INPUT");
         add->onClick = [this]
@@ -515,18 +525,119 @@ private:
             mesa::SourceDef d;
             d.name = "INPUT " + std::to_string (settings.catalog.sources.size() + 1);
             settings.catalog.add (d);
+            editandoInput = int (settings.catalog.sources.size()) - 1;
             rebuildTabs();
         };
         p->addRow ("Novo", add, 30);
 
-        static const char* uses[] = { "Operador", "Produtor", "Convidado CR", "Convidado Estudio",
-                                      "Mic Externo", "Linha", "Telefone", "Codec",
+        static const char* usos[] = { "MIC Operador", "MIC Produtor",
+                                      "MIC Convidado (controle)", "MIC Convidado (estudio)",
+                                      "MIC Externo", "Linha", "Telefone", "Codec",
                                       "Player de PC", "Feed de Estudio" };
 
-        for (size_t si = 0; si < settings.catalog.sources.size(); ++si)
+        for (size_t i = 0; i < settings.catalog.sources.size(); ++i)
         {
-            auto& src = settings.catalog.sources[si];
-            p->addTitle (juce::String (src.name));
+            const auto& src = settings.catalog.sources[i];
+
+            juce::String fonte;
+            if (src.livewireChannel > 0)      fonte = "Livewire " + juce::String (src.livewireChannel);
+            else if (! src.streamName.empty()) fonte = "NDI " + juce::String (src.streamName);
+            else if (! src.deviceName.empty()) fonte = juce::String (src.deviceName)
+                                                     + " entrada " + juce::String (src.deviceChannel + 1);
+            else if (src.index >= 0)           fonte = "entrada " + juce::String (src.index + 1);
+            else                               fonte = "sem fonte";
+
+            auto* linha = new juce::TextButton (juce::String (src.name)
+                                                + "      " + usos[juce::jlimit (0, 9, src.type)]
+                                                + "      " + fonte);
+            linha->setColour (juce::TextButton::buttonColourId, theme::surfaceLo);
+            linha->onClick = [this, i] { editandoInput = int (i); rebuildTabs(); };
+            p->addWide (linha, 28);
+        }
+
+
+
+        {
+            p->addTitle ("Latencia das placas secundarias");
+
+            auto* modeBox = new juce::ComboBox();
+            modeBox->addItem ("Minima (menos margem)", 1);
+            modeBox->addItem ("Equilibrada", 2);
+            modeBox->addItem ("Segura (mais margem)", 3);
+            modeBox->setSelectedId (settings.secondaryLatencyMode + 1, juce::dontSendNotification);
+            modeBox->onChange = [this, modeBox]
+            {
+                settings.secondaryLatencyMode = modeBox->getSelectedId() - 1;
+                if (secondaries != nullptr)
+                {
+                    secondaries->setLatencyMode (settings.secondaryLatencyMode);
+                    secondaries->closeAll();     // reabre com a nova profundidade
+                }
+                statusLabel.setText ("feche as configuracoes para aplicar",
+                                     juce::dontSendNotification);
+            };
+            p->addRow ("Modo", modeBox);
+            p->addNote ("Minima corta a fila ao osso. Se a coluna de falhas abaixo subir "
+                        "durante a operacao, esta rasa demais para esta maquina — suba um "
+                        "nivel. Falha zero por meia hora e o sinal de que aguenta.");
+        }
+
+        if (secondaries != nullptr && secondaries->count() > 0)
+        {
+            p->addTitle ("Placas secundarias em uso");
+            p->addNote ("A secundaria sempre acrescenta latencia: o buffer do driver mais "
+                        "a fila que absorve a diferenca de relogio. ASIO usa fila rasa; "
+                        "WASAPI precisa de folga. Microfone deve ficar na mestra.");
+            for (int i = 0; i < secondaries->count(); ++i)
+            {
+                if (auto* d = secondaries->at (i))
+                {
+                    juce::String txt = juce::String (int (d->sampleRate())) + " Hz  |  +"
+                                     + juce::String (d->latencyMs(), 1) + " ms de fila";
+                    txt += "  |  falhas: " + juce::String (d->glitches());
+                    if (d->dropouts() > 0) txt += "  |  quedas: " + juce::String (d->dropouts());
+                    if (d->isLost())       txt += "  |  PERDIDA";
+                    p->addRow (d->deviceName(), makeReadOnly (txt.toStdString()));
+                }
+            }
+        }
+
+        if (secondaries != nullptr && secondaries->count() > 0)
+        {
+            p->addTitle ("Placas secundarias em uso");
+            for (int i = 0; i < secondaries->count(); ++i)
+                if (auto* d = secondaries->at (i))
+                {
+                    juce::String txt = juce::String (int (d->sampleRate())) + " Hz  |  +"
+                                     + juce::String (d->latencyMs(), 1) + " ms de fila"
+                                     + "  |  falhas " + juce::String (d->glitches());
+                    if (d->isLost()) txt += "  |  PERDIDA";
+                    p->addRow (d->deviceName(), makeReadOnly (txt.toStdString()));
+                }
+        }
+        return p;
+    }
+
+    /** Detalhe de UM input. */
+    CfgPage* buildInputDetail (size_t indice)
+    {
+        auto& src = settings.catalog.sources[indice];
+        auto* p = new CfgPage();
+
+        auto* voltar = new juce::TextButton ("< VOLTAR A LISTA");
+        voltar->onClick = [this] { editandoInput = -1; rebuildTabs(); };
+        p->addWide (voltar, 30);
+        p->addTitle (juce::String (src.name));
+
+        // Nomes que dizem o que a coisa E. "Operador" nao deixa claro que se
+        // trata de microfone — e o tipo e justamente o que decide o mute
+        // automatico do monitor e o mix-minus.
+        static const char* uses[] = { "MIC Operador", "MIC Produtor",
+                                      "MIC Convidado (controle)", "MIC Convidado (estudio)",
+                                      "MIC Externo", "Linha", "Telefone", "Codec",
+                                      "Player de PC", "Feed de Estudio" };
+        const size_t si = indice;
+        {
 
             auto* nameBox = new juce::TextEditor();
             nameBox->setText (src.name, juce::dontSendNotification);
@@ -598,9 +709,14 @@ private:
                 auto* sideBox = new juce::ComboBox();
                 sideBox->addItem ("Esquerdo", 1);
                 sideBox->addItem ("Direito", 2);
+                sideBox->addItem ("Estereo (soma L+R)", 3);
                 sideBox->setSelectedId (src.livewireSide + 1, juce::dontSendNotification);
                 sideBox->onChange = [sideBox, &src] { src.livewireSide = sideBox->getSelectedId() - 1; };
-                p->addRow ("Lado do estereo", sideBox);
+                p->addRow ("Canal do estereo", sideBox);
+                p->addNote ("O canal desta mesa e MONO com pan, como em console de radio: "
+                            "cada fader carrega um sinal. Para microfone, telefone e codec "
+                            "isso e o certo. Para playout com musica, use a soma — pegar so "
+                            "um lado perderia metade do conteudo.");
 
                 p->addRow ("Endereco", makeReadOnly (src.livewireChannel > 0
                     ? (LivewireReceiver::addressForChannel (src.livewireChannel) + ":5004").toStdString()
@@ -691,6 +807,37 @@ private:
             camBox->onChange = [camBox, &src] { src.camera = camBox->getSelectedId() - 1; };
             p->addRow ("Camera", camBox);
 
+            p->addTitle ("GPIO deste input");
+
+            auto* gpoP = new juce::TextEditor();
+            gpoP->setText (juce::String (src.gpoPorta), juce::dontSendNotification);
+            gpoP->setInputRestrictions (2, "0123456789");
+            gpoP->onTextChange = [gpoP, &src] { src.gpoPorta = gpoP->getText().getIntValue(); };
+            p->addRow ("Saida: porta", gpoP);
+
+            auto* gpoN = new juce::TextEditor();
+            gpoN->setText (juce::String (src.gpoPino), juce::dontSendNotification);
+            gpoN->setInputRestrictions (1, "12345");
+            gpoN->onTextChange = [gpoN, &src] { src.gpoPino = gpoN->getText().getIntValue(); };
+            p->addRow ("Saida: pino", gpoN);
+            p->addNote ("Acompanha o ON/OFF do canal: fecha o contato quando abre o fader. "
+                        "E o que acende a luz de ar e aciona rele. Zero desliga.");
+
+            auto* gpiP = new juce::TextEditor();
+            gpiP->setText (juce::String (src.gpiPorta), juce::dontSendNotification);
+            gpiP->setInputRestrictions (2, "0123456789");
+            gpiP->onTextChange = [gpiP, &src] { src.gpiPorta = gpiP->getText().getIntValue(); };
+            p->addRow ("Entrada: porta", gpiP);
+
+            auto* gpiN = new juce::TextEditor();
+            gpiN->setText (juce::String (src.gpiPino), juce::dontSendNotification);
+            gpiN->setInputRestrictions (1, "12345");
+            gpiN->onTextChange = [gpiN, &src] { src.gpiPino = gpiN->getText().getIntValue(); };
+            p->addRow ("Entrada: pino", gpiN);
+            p->addNote ("Contato externo liga e desliga este canal — botao de mesa, pedal, "
+                        "comando de estudio. Zero desliga.");
+
+            p->addTitle ("Trigger");
             dbSlider (*p, "Threshold", src.thresholdDb, -70.0f, -10.0f,
                       [&src] (float v) { src.thresholdDb = v; });
             toggle (*p, "Trigger ligado", src.triggerEnabled,
@@ -698,59 +845,16 @@ private:
 
             auto* del = new juce::TextButton ("REMOVER INPUT");
             const std::string nameCopy = src.name;
-            del->onClick = [this, nameCopy] { settings.catalog.remove (nameCopy); rebuildTabs(); };
+            del->onClick = [this, nameCopy]
+            { settings.catalog.remove (nameCopy); editandoInput = -1; rebuildTabs(); };
             p->addRow ("", del, 28);
         }
 
-        if (settings.catalog.sources.empty())
-            p->addNote ("Nenhum input ainda. Aperte ADICIONAR INPUT.");
 
-        {
-            p->addTitle ("Latencia das placas secundarias");
 
-            auto* modeBox = new juce::ComboBox();
-            modeBox->addItem ("Minima (menos margem)", 1);
-            modeBox->addItem ("Equilibrada", 2);
-            modeBox->addItem ("Segura (mais margem)", 3);
-            modeBox->setSelectedId (settings.secondaryLatencyMode + 1, juce::dontSendNotification);
-            modeBox->onChange = [this, modeBox]
-            {
-                settings.secondaryLatencyMode = modeBox->getSelectedId() - 1;
-                if (secondaries != nullptr)
-                {
-                    secondaries->setLatencyMode (settings.secondaryLatencyMode);
-                    secondaries->closeAll();     // reabre com a nova profundidade
-                }
-                statusLabel.setText ("feche as configuracoes para aplicar",
-                                     juce::dontSendNotification);
-            };
-            p->addRow ("Modo", modeBox);
-            p->addNote ("Minima corta a fila ao osso. Se a coluna de falhas abaixo subir "
-                        "durante a operacao, esta rasa demais para esta maquina — suba um "
-                        "nivel. Falha zero por meia hora e o sinal de que aguenta.");
-        }
-
-        if (secondaries != nullptr && secondaries->count() > 0)
-        {
-            p->addTitle ("Placas secundarias em uso");
-            p->addNote ("A secundaria sempre acrescenta latencia: o buffer do driver mais "
-                        "a fila que absorve a diferenca de relogio. ASIO usa fila rasa; "
-                        "WASAPI precisa de folga. Microfone deve ficar na mestra.");
-            for (int i = 0; i < secondaries->count(); ++i)
-            {
-                if (auto* d = secondaries->at (i))
-                {
-                    juce::String txt = juce::String (int (d->sampleRate())) + " Hz  |  +"
-                                     + juce::String (d->latencyMs(), 1) + " ms de fila";
-                    txt += "  |  falhas: " + juce::String (d->glitches());
-                    if (d->dropouts() > 0) txt += "  |  quedas: " + juce::String (d->dropouts());
-                    if (d->isLost())       txt += "  |  PERDIDA";
-                    p->addRow (d->deviceName(), makeReadOnly (txt.toStdString()));
-                }
-            }
-        }
         return p;
     }
+
 
     /** Outputs: destinos da mesa. Cada um diz o que sai e por onde. */
     CfgPage* buildOutputsTab()
@@ -801,6 +905,39 @@ private:
             tBox->onChange = [this, tBox, oi] { outputT[oi] = tBox->getSelectedId() - 1; rebuildTabs(); };
             p->addRow ("Tipo", tBox);
 
+            // Livewire nativo na saida: a mesa TRANSMITE naquele canal e o no
+            // Axia recebe apontando o Primary source para o numero.
+            if (t == Transport::Livewire)
+            {
+                auto* lwBox = new juce::TextEditor();
+                lwBox->setText (juce::String (out.livewireChannel), juce::dontSendNotification);
+                lwBox->setInputRestrictions (5, "0123456789");
+                lwBox->setFont (theme::mono (12.0f));
+                lwBox->onTextChange = [lwBox, &out]
+                {
+                    out.livewireChannel = lwBox->getText().getIntValue();
+                    if (out.livewireChannel > 0)
+                    {
+                        out.kind = int (mesa::InputKind::Network);
+                        out.deviceName.clear();
+                        out.streamName.clear();
+                        out.pair = -1;
+                    }
+                };
+                p->addRow ("Canal a transmitir", lwBox);
+                p->addRow ("Endereco", makeReadOnly (out.livewireChannel > 0
+                    ? (LivewireSender::addressForChannel (out.livewireChannel) + ":5004").toStdString()
+                    : std::string ("-")));
+                p->addNote ("A mesa vira fonte Livewire nesse canal. Ela NAO aparece na "
+                            "lista de nomes do QOR — aquela lista vem do protocolo de "
+                            "anuncio, que e proprietario. No no, aponte o Primary source "
+                            "para este numero.");
+                p->addNote ("Transmitimos no relogio da maquina, sem travar no PTP da "
+                            "rede. A correcao adaptativa absorve a diferenca, mas isso "
+                            "so se prova em teste longo com o no real.");
+            }
+            else
+            {
             const auto avail = availableOutputs (t);
             auto* dstBox = new juce::ComboBox();
             int sel = 1;
@@ -840,6 +977,8 @@ private:
             };
             p->addRow ("Para onde", dstBox);
 
+            }
+
             auto* del = new juce::TextButton ("REMOVER OUTPUT");
             const std::string nameCopy = out.name;
             del->onClick = [this, nameCopy] { settings.outputs.remove (nameCopy); rebuildTabs(); };
@@ -849,7 +988,7 @@ private:
         if (settings.outputs.outputs.empty())
             p->addNote ("Nenhum output ainda. Aperte ADICIONAR OUTPUT.");
 
-        dbSlider (*p, "Ganho do master", settings.routing.masterGainDb, -20.0f, 10.0f,
+        dbSlider (*p, "Ganho do master", settings.routing.masterGainDb, -20.0f, 20.0f,
                   [this] (float v) { settings.routing.masterGainDb = v; mix.masterGainDb.store (v); });
         return p;
     }
@@ -866,6 +1005,7 @@ private:
     {
         auto it = outputT.find (i);
         if (it != outputT.end()) return Transport (it->second);
+        if (o.livewireChannel > 0) return Transport::Livewire;
         return o.kind == int (mesa::InputKind::Network) ? Transport::Ndi : Transport::Asio;
     }
 
@@ -979,6 +1119,9 @@ private:
         p->addRow ("Fontes vistas", rescan, 30);
         refreshNdiList();
 
+        p->addNote ("A descoberta so fica ligada com esta janela aberta ou quando existe "
+                    "input usando NDI — deixar a busca varrendo a rede o dia todo sem "
+                    "necessidade ja derrubou a mesa uma vez.");
         p->addNote ("A descoberta roda sozinha em segundo plano. Se a lista vier vazia, "
                     "confira se o emissor esta na mesma sub-rede e se o mDNS nao esta "
                     "bloqueado pelo firewall.");
@@ -990,6 +1133,17 @@ private:
                  [this] (const juce::String& v) { settings.network.discoveryServer = v.toStdString(); });
         toggle (*p, "Preferir multicast", settings.network.preferMulticast,
                 [this] (bool v) { settings.network.preferMulticast = v; });
+
+        p->addTitle ("GPIO");
+        toggle (*p, "GPIO habilitado", settings.gpioEnabled,
+                [this] (bool v) { settings.gpioEnabled = v; });
+        textBox (*p, "No do GPIO", settings.gpioNode,
+                 [this] (const juce::String& v) { settings.gpioNode = v.toStdString(); });
+        p->addNote ("Vazio usa o mesmo no do Livewire. O QOR desta instalacao ja tem "
+                    "8 entradas e 8 saidas com contato seco — nao ha placa de rele para "
+                    "comprar nem driver para instalar. O mapeamento de porta e pino fica "
+                    "em cada input, na aba Inputs.");
+        p->addNote ("Trocar isto exige reabrir a mesa.");
 
         p->addTitle ("Receber comandos");
         p->addNote ("Comandos de texto, uma linha cada: CH1 ON / CH1 PLAY, CH1 OFF, "
@@ -1427,6 +1581,8 @@ private:
         mesa::applyRouting (settings, mix);
         mesa::applyOutputs (settings.outputs, mix);
         applyTally();
+        if (auto xml = deviceManager.createStateXml())
+            settings.deviceState = xml->toString().toStdString();
         const auto json = mesa::settingsToJson (settings);
         settingsFile.replaceWithText (json);
         statusLabel.setText ("salvo em " + settingsFile.getFileName()
@@ -1445,6 +1601,7 @@ private:
     juce::Label* ndiList = nullptr;
     mutable std::map<size_t, int> inputT, outputT;
     std::vector<LwrpClient::Source> livewireSources;
+    int editandoInput = -1;
     juce::String livewireStatus { "nao consultado" };
     std::vector<VmixClient::Input> vmixInputs;
     juce::String vmixStatus { "nao consultado" };

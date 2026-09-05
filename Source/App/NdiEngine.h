@@ -141,10 +141,30 @@ public:
 
     bool discovering() const noexcept { return findThread.joinable(); }
 
-    ~NdiEngine()
+    /** Encerramento EXPLICITO, chamado pela mesa antes de o JUCE desmontar.
+
+        O destrutor deste objeto roda na destruicao de estaticos, depois que o
+        Windows ja pode ter descarregado a DLL do NDI — chamar destroy() ali
+        derruba o processo na saida. Foi o que apareceu no mesa-crash.log:
+        queda no mesmo segundo do encerramento normal, com a pilha dentro de
+        uma DLL. Encerrando antes, a ordem fica sob nosso controle. */
+    void shutdown()
     {
         stopDiscovery();
-        if (lib != nullptr) lib->destroy();
+        if (lib != nullptr && ! jaEncerrado)
+        {
+            lib->destroy();
+            jaEncerrado = true;
+            lib = nullptr;
+        }
+    }
+
+    ~NdiEngine()
+    {
+        // De proposito NAO chama destroy() aqui: se a mesa nao tiver encerrado
+        // explicitamente, e mais seguro vazar a biblioteca do que arriscar
+        // tocar numa DLL ja descarregada durante a saida do processo.
+        stopDiscovery();
     }
 
     const NDIlib_v5* api() const noexcept { return lib; }
@@ -171,6 +191,7 @@ private:
     }
 
     const NDIlib_v5* lib = nullptr;
+    bool jaEncerrado = false;
     NDIlib_find_instance_t finder = nullptr;
     std::thread findThread;
 
@@ -179,6 +200,7 @@ private:
     NdiEngine() { statusText = "compilado sem o SDK do NDI"; }
     void startDiscovery() {}
     void stopDiscovery() {}
+    void shutdown() {}
     bool discovering() const noexcept { return false; }
     void* api() const noexcept { return nullptr; }
     void* lib = nullptr;
@@ -231,6 +253,9 @@ public:
         dst.setDriftCorrection (false);
 
         quit.store (false);
+        abertoMs = juce::Time::getMillisecondCounterHiRes();
+        ultimoMs = 0.0;
+        recebidos.store (0);
         worker = std::thread ([this] { pumpLoop(); });
         name = sourceName;
         return true;
@@ -257,6 +282,27 @@ public:
     bool running() const noexcept { return worker.joinable(); }
     const std::string& sourceName() const noexcept { return name; }
 
+    /** Segundos desde o ultimo quadro com audio. Zero quando esta chegando.
+
+        A pergunta certa nao e "ja chegou alguma coisa?", e sim "parou de
+        chegar?". A versao anterior acusava perda sempre que o contador ainda
+        estava em zero — inclusive nos primeiros instantes depois de conectar,
+        e mesmo com a fonte na propria maquina. */
+    double segundosSemAudio() const noexcept
+    {
+        if (ultimoMs <= 0.0) return 0.0;   // ainda nem comecou: nao e perda
+        return (juce::Time::getMillisecondCounterHiRes() - ultimoMs) / 1000.0;
+    }
+
+    /** Carencia depois de abrir: nem toda fonte manda audio no primeiro
+        segundo, e alarmar nesse intervalo so gera ruido. */
+    bool emCarencia() const noexcept
+    {
+        return (juce::Time::getMillisecondCounterHiRes() - abertoMs) < 5000.0;
+    }
+
+    int quadros() const noexcept { return recebidos.load(); }
+
 private:
 #if MESA_HAS_NDI
     void pumpLoop()
@@ -277,6 +323,8 @@ private:
                 std::memcpy (mono.data(), frame.p_data, size_t (n) * sizeof (float));
                 for (int i = n; i < block; ++i) mono[size_t (i)] = 0.0f;
                 dst.push (mono.data(), block);
+                ultimoMs = juce::Time::getMillisecondCounterHiRes();
+                recebidos.fetch_add (1);
             }
             lib->framesync_free_audio (sync, &frame);
 
@@ -291,6 +339,9 @@ private:
 #endif
 
     mesa::AsyncSource& dst;
+    std::atomic<double> ultimoMs { 0.0 };
+    double abertoMs = 0.0;
+    std::atomic<int> recebidos { 0 };
     double sr;
     int block;
     std::string name;

@@ -52,11 +52,19 @@ private:
         explicit MainWindow (const juce::String& title)
             : DocumentWindow (title, juce::Colours::black, DocumentWindow::allButtons)
         {
-            setUsingNativeTitleBar (true);
+            // Sem barra de titulo do sistema: a mesa ocupa a tela inteira,
+            // inclusive por cima da barra de tarefas. Numa mesa de ar, ver o
+            // Windows atras e convite a clicar no lugar errado no meio do
+            // programa.
+            setUsingNativeTitleBar (false);
+            setTitleBarHeight (0);
             setContentOwned (new MainComponent (12), true);   // 12 faders
-            setResizable (true, true);
+            setResizable (true, false);
             centreWithSize (getWidth(), getHeight());
             setVisible (true);
+
+            // Cobre a barra de tarefas.
+            juce::Desktop::getInstance().setKioskModeComponent (this, false);
         }
 
         void closeButtonPressed() override { JUCEApplication::getInstance()->systemRequestedQuit(); }

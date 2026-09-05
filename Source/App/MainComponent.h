@@ -9,6 +9,7 @@
 #include "SecondaryDevices.h"
 #include "NetworkHub.h"
 #include "CommandReceiver.h"
+#include "GpioClient.h"
 #include "../Core/RemoteCommand.h"
 #include <map>
 #if JUCE_WINDOWS
@@ -69,7 +70,7 @@ public:
         else
             settingsFile.replaceWithText (mesa::settingsToJson (settings));
 
-        auto err = engine.start (numChannels, 8);
+        auto err = engine.start (numChannels, 8, juce::String (settings.deviceState));
         openError = err;
 
         mesa::applyRouting (settings, engine.mixer);
@@ -126,6 +127,8 @@ public:
                                 + juce::String (settings.remoteUdpPort));
         }
 
+        iniciaGpio();
+
         secondaries.setLatencyMode (settings.secondaryLatencyMode);
         hub = std::make_unique<NetworkHub> (engine, secondaries);
         rebindNetwork();
@@ -136,6 +139,46 @@ public:
             log ("painel de automacao ainda nao portado");
         };
         addAndMakeVisible (*masterPanel);
+
+        // ---- barra lateral de janela
+        //
+        // Sem barra de titulo do sistema, a mesa precisa oferecer as tres
+        // acoes que o operador ainda vai querer: encolher para olhar outra
+        // coisa, sair do modo tela cheia, e fechar. Ficam numa faixa estreita
+        // na borda, longe dos faders — nao se aperta sem querer.
+        janelaMin = std::make_unique<SurfaceButton> ("\xe2\x80\x94", theme::busGreen, 15.0f);
+        janelaMin->onClick = [this]
+        {
+            if (auto* peer = getPeer()) peer->setMinimised (true);
+        };
+        addAndMakeVisible (*janelaMin);
+
+        janelaTela = std::make_unique<SurfaceButton> ("[ ]", theme::busGreen, 13.0f);
+        janelaTela->setActive (true);
+        janelaTela->onClick = [this]
+        {
+            auto& d = juce::Desktop::getInstance();
+            const bool estaCheia = d.getKioskModeComponent() != nullptr;
+            d.setKioskModeComponent (estaCheia ? nullptr : getTopLevelComponent(), false);
+            janelaTela->setActive (! estaCheia);
+        };
+        addAndMakeVisible (*janelaTela);
+
+        janelaSair = std::make_unique<SurfaceButton> ("X", theme::onRed, 15.0f);
+        janelaSair->onClick = [this]
+        {
+            // confirma: fechar a mesa no meio do ar por clique errado seria
+            // o pior defeito possivel de interface
+            juce::NativeMessageBox::showOkCancelBox (
+                juce::MessageBoxIconType::WarningIcon, "Sair da mesa",
+                "Fechar o Mesa Console? O audio para.",
+                nullptr,
+                juce::ModalCallbackFunction::create ([] (int r)
+                {
+                    if (r == 1) juce::JUCEApplication::getInstance()->systemRequestedQuit();
+                }));
+        };
+        addAndMakeVisible (*janelaSair);
 
         pageButton.setButtonText ("PAGINA: --");
         pageButton.onClick = [this] { nextPage(); };
@@ -160,7 +203,10 @@ public:
         addAndMakeVisible (netLog);
 
         buildStrips();
-        setSize (1366, 768);
+        // Resolucao de referencia: 1920x1080. O layout e proporcional, entao
+        // ele acompanha janela maior ou menor — mas e nesta medida que as
+        // proporcoes foram pensadas.
+        setSize (1920, 1080);
         startTimerHz (25);
     }
 
@@ -185,6 +231,9 @@ public:
             sceneFile.copyFileTo (sceneFile.getSiblingFile ("scene.json.bak"));
         sceneFile.replaceWithText (json);
 
+        // a placa faz parte do estado: sem isto ela volta ao padrao do Windows
+        settings.deviceState = engine.estadoAtual().toStdString();
+
         const auto cfg = mesa::settingsToJson (settings);
         if (cfg.size() > 32)
         {
@@ -198,6 +247,18 @@ public:
     ~MainComponent() override
     {
         salvarEstado ("fechando");
+
+        // Desligar na ordem certa, e cedo. O crash de saida vinha daqui: o
+        // processo terminava com threads de rede ainda vivas e bibliotecas
+        // ja descarregadas. Nada disso e opcional no encerramento.
+        heartbeat.stopTimer();
+        stopTimer();
+        receiver.stop();
+        gpio.stop();
+        if (hub != nullptr) hub->shutdown();
+        secondaries.closeAll();
+        NdiEngine::instance().shutdown();
+        logToFile ("desligamento ordenado concluido");
         // Sem esta linha, "sumiu" e "foi fechada" ficam indistinguiveis no log.
         logToFile ("=== mesa encerrada normalmente ===");
     }
@@ -229,23 +290,49 @@ public:
         chassis = r;
 
         auto inner = chassis.reduced (10);
-        bridge.setBounds (inner.removeFromTop (92));
+
+
+        // Linha do topo: botoes de janela a esquerda, ponte de medidores no
+        // resto. Ficavam numa faixa vertical propria, que roubava largura da
+        // mesa inteira e deixava um vazio ao lado da coluna de layer.
+        auto linhaTopo = inner.removeFromTop (84);
+        auto colJanela = linhaTopo.removeFromLeft (34);
+        linhaTopo.removeFromLeft (8);
+
+        const int hb = (colJanela.getHeight() - 8) / 3;
+        janelaSair->setBounds (colJanela.removeFromTop (hb));
+        colJanela.removeFromTop (4);
+        janelaMin ->setBounds (colJanela.removeFromTop (hb));
+        colJanela.removeFromTop (4);
+        janelaTela->setBounds (colJanela.removeFromTop (hb));
+
+        bridge.setBounds (linhaTopo);
         inner.removeFromTop (8);
 
-        auto bottom = inner.removeFromBottom (86);
-        auto logArea = bottom.removeFromRight (430);
-        auto topRow = bottom.removeFromTop (30);
-        cfgButton .setBounds (topRow.removeFromLeft (200));
-        topRow.removeFromLeft (8);
-        pageButton.setBounds (topRow.removeFromLeft (200));
-        testMode .setBounds (bottom.removeFromTop (26).removeFromLeft (300));
-        netLog.setBounds (logArea);
-        inner.removeFromBottom (8);
-
-        masterPanel->setBounds (inner.removeFromRight (250));
+        // COLUNA DA DIREITA: painel master em cima, controles e log embaixo.
+        //
+        // Antes havia uma faixa inferior atravessando a mesa inteira, so para
+        // dois botoes, uma caixa de marcar e o log. Ela roubava altura das
+        // tiras — e altura de tira e curso de fader, que e o que mais importa
+        // numa mesa. Tudo isso cabe folgado sob o painel de automacao.
+        auto colDireita = inner.removeFromRight (300);
         inner.removeFromRight (8);
 
-        auto layerCol = inner.removeFromLeft (52);
+        auto rodape = colDireita.removeFromBottom (190);
+        colDireita.removeFromBottom (8);
+        masterPanel->setBounds (colDireita);
+
+        auto linhaBotoes = rodape.removeFromTop (28);
+        cfgButton .setBounds (linhaBotoes.removeFromLeft (145));
+        linhaBotoes.removeFromLeft (6);
+        pageButton.setBounds (linhaBotoes);
+        rodape.removeFromTop (4);
+
+        testMode.setBounds (rodape.removeFromTop (22));
+        rodape.removeFromTop (4);
+        netLog.setBounds (rodape);
+
+        auto layerCol = inner.removeFromLeft (64);
         layerA->setBounds (layerCol.removeFromTop (layerCol.getHeight() / 2).withTrimmedBottom (3));
         layerB->setBounds (layerCol.withTrimmedTop (3));
         inner.removeFromLeft (6);
@@ -452,7 +539,7 @@ private:
                 what = "OFF";
                 break;
             case mesa::RemoteCommand::Action::Fader:
-                ch.params.faderDb.store (juce::jlimit (-60.0f, 10.0f, c.value));
+                ch.params.faderDb.store (juce::jlimit (theme::kFaderBottomDb, theme::kFaderTopDb, c.value));
                 what = "fader " + juce::String (c.value, 1) + " dB";
                 break;
             case mesa::RemoteCommand::Action::Cue:
@@ -495,6 +582,39 @@ private:
           << "  |  log " << juce::String (netLog.getTotalNumChars()) << " chars"
           << "  |  cmds " << juce::String (receiver.received())
           << "  |  secundarias " << juce::String (secondaries.count());
+
+        // Dois faders carregando o MESMO input entregam o mesmo sinal duas
+        // vezes ao bus: soma 6 dB e parece defeito de audio. Nao proibimos —
+        // as vezes e proposital — mas avisamos uma vez.
+        if (! avisouDuplicado)
+        {
+            const int n = engine.mixer.numChannels();
+            for (int a = 0; a < n && ! avisouDuplicado; ++a)
+            {
+                const auto& na = engine.mixer.channel (a).name;
+                if (na.empty()) continue;
+                for (int b = a + 1; b < n; ++b)
+                    if (engine.mixer.channel (b).name == na)
+                    {
+                        avisouDuplicado = true;
+                        log ("ATENCAO: o input \"" + juce::String (na) + "\" esta em dois "
+                             "faders (CH" + juce::String (a + 1) + " e CH" + juce::String (b + 1)
+                             + ") — o sinal soma duas vezes no bus");
+                        break;
+                    }
+            }
+        }
+
+        // fila mal dimensionada corrompe memoria em silencio: se aparecer, tem
+        // que gritar no log
+        for (int i = 0; i < AudioEngine::kMaxNetSlots; ++i)
+            if (auto* q = engine.netSlot[size_t (i)].load())
+                if (q->badPulls() > 0 && ! avisouFila)
+                {
+                    avisouFila = true;
+                    log ("ALERTA: fila de rede pediu mais do que comporta ("
+                         + juce::String (q->badPulls()) + "x) — avise o desenvolvedor");
+                }
 
         for (int i = 0; i < secondaries.count(); ++i)
             if (auto* d = secondaries.at (i))
@@ -610,6 +730,72 @@ private:
         netLog.insertTextAtCaret (line + "\n");
     }
 
+    void iniciaGpio()
+    {
+        if (! settings.gpioEnabled) return;
+
+        const juce::String no = settings.gpioNode.empty()
+                                    ? juce::String (settings.livewireNode)
+                                    : juce::String (settings.gpioNode);
+        if (no.isEmpty()) { pendingLog.add ("GPIO: sem endereco do no"); return; }
+
+        gpio.start (no, [this] (GpioClient::Evento e)
+        {
+            // vem da thread de rede: so enfileira, aplica no timer
+            std::lock_guard<std::mutex> g (mutexGpio);
+            entradasGpio.push_back (e);
+        });
+        pendingLog.add ("GPIO ligado em " + no + ":93");
+    }
+
+    /** Entrada do no liga ou desliga o canal mapeado. */
+    void aplicaEntradasGpio()
+    {
+        std::vector<GpioClient::Evento> lote;
+        {
+            std::lock_guard<std::mutex> g (mutexGpio);
+            lote.swap (entradasGpio);
+        }
+
+        for (const auto& e : lote)
+            for (int i = 0; i < engine.mixer.numChannels(); ++i)
+            {
+                const auto* def = settings.catalog.find (engine.mixer.channel (i).name);
+                if (def == nullptr) continue;
+                if (def->gpiPorta != e.porta || def->gpiPino != e.pino) continue;
+
+                pressOnOff (i, e.fechado);
+                log ("GPI porta " + juce::String (e.porta) + " pino " + juce::String (e.pino)
+                     + (e.fechado ? " fechou" : " abriu") + " -> CH" + juce::String (i + 1)
+                     + (e.fechado ? " ON" : " OFF"));
+            }
+    }
+
+    /** ON/OFF do canal aciona a saida mapeada: luz de ar, rele, tally. */
+    void atualizaSaidasGpio()
+    {
+        if (! settings.gpioEnabled || ! gpio.conectado()) return;
+
+        const int n = engine.mixer.numChannels();
+        if (int (ultimoOn.size()) != n) ultimoOn.assign (size_t (n), -1);
+
+        for (int i = 0; i < n; ++i)
+        {
+            const auto* def = settings.catalog.find (engine.mixer.channel (i).name);
+            if (def == nullptr || def->gpoPorta <= 0 || def->gpoPino <= 0) continue;
+
+            const int agora = engine.mixer.channel (i).params.on.load() ? 1 : 0;
+            if (agora == ultimoOn[size_t (i)]) continue;   // so na borda
+            ultimoOn[size_t (i)] = agora;
+
+            gpio.setPino (def->gpoPorta, def->gpoPino, agora == 1);
+            log ("CH" + juce::String (i + 1) + (agora ? " ON" : " OFF")
+                 + " -> GPO porta " + juce::String (def->gpoPorta)
+                 + " pino " + juce::String (def->gpoPino)
+                 + (agora ? " FECHA" : " ABRE"));
+        }
+    }
+
     void rebindNetwork()
     {
         // Descoberta so fica de pe se alguma fonte de fato usa NDI. Manter a
@@ -619,8 +805,9 @@ private:
         for (const auto& src : settings.catalog.sources)
             if (! src.streamName.empty()) { usesNdi = true; break; }
 
-        if (usesNdi) NdiEngine::instance().startDiscovery();
-        else if (! configOpen) NdiEngine::instance().stopDiscovery();
+        // Uma vez ligada, a descoberta so para no encerramento. Religar em
+        // operacao ja derrubou a mesa.
+        if (usesNdi || configOpen) NdiEngine::instance().startDiscovery();
 
         const double sr = engine.sampleRate.load();
         const int    bl = juce::jmax (32, engine.blockSize.load());
@@ -650,6 +837,8 @@ private:
         for (const auto& in : receiver.take()) applyRemote (in);
 
         logTriggerChanges();
+        aplicaEntradasGpio();
+        atualizaSaidasGpio();
 
         auto probs = hub->problems();
         if (engine.mixer.automation.testMode.load())
@@ -734,12 +923,17 @@ private:
     juce::OwnedArray<ChannelStrip> strips;
     std::unique_ptr<SurfaceButton> layerA, layerB;
     std::unique_ptr<MasterPanel> masterPanel;
+    std::unique_ptr<SurfaceButton> janelaMin, janelaTela, janelaSair;
     juce::TextButton cfgButton, pageButton;
     juce::ToggleButton testMode;
     juce::TextEditor netLog;
     juce::Rectangle<int> chassis, statusArea;
     SecondaryDevices secondaries;
     CommandReceiver receiver;
+    GpioClient gpio;
+    std::mutex mutexGpio;
+    std::vector<GpioClient::Evento> entradasGpio;
+    std::vector<int> ultimoOn;
     juce::StringArray pendingLog;
     juce::File logFile;
 
@@ -753,6 +947,8 @@ private:
     double startedMs = 0.0, baselineMb = 0.0;
     bool warnedMemory = false;
     bool configOpen = false;
+    bool avisouFila = false;
+    bool avisouDuplicado = false;
     std::vector<int> lastTrigState;
     /** Fader guardado por PAUSE, para o PLAY seguinte retomar no mesmo ponto. */
     std::map<int, float> pausedFader;

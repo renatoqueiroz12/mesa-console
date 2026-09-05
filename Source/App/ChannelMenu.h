@@ -135,64 +135,76 @@ private:
     }
 
     // ------------------------------------------------------------- secoes
+    /** Aba Fonte: SO escolhe qual input do catalogo esta neste fader.
+
+        Antes dava para editar origem, entrada e tipo aqui dentro, por fora do
+        catalogo. Eram duas maos escrevendo no mesmo lugar: o canal podia ficar
+        apontando para uma entrada que o catalogo desconhecia, e apareceu sinal
+        onde nao devia. Agora o catalogo manda sozinho, e esta tela so carrega
+        e mostra. Para mexer na fonte, e em Configuracoes > Inputs. */
     CfgPage* buildSource()
     {
         auto* p = new CfgPage();
-        p->addTitle ("Fonte carregada no canal");
-        p->addNote ("A logica segue a FONTE: tipo, camera e threshold viajam com ela. "
-                    "Trocar a fonte muda o comportamento automatico do canal.");
+        p->addTitle ("Input carregado neste fader");
 
-        // carregar do catalogo: e assim que uma fonte de rede entra no fader
         auto* load = new juce::ComboBox();
-        load->addItem ("(escolher canal)", 1);
-        int id = 2;
-        for (const auto& src : settings.catalog.sources) load->addItem (src.name, id++);
+        load->addItem ("(vazio)", 1);
+        int sel = 1, id = 2;
+        for (const auto& src : settings.catalog.sources)
+        {
+            load->addItem (src.name, id);
+            if (juce::String (src.name).equalsIgnoreCase (juce::String (ch.name))) sel = id;
+            ++id;
+        }
+        load->setSelectedId (sel, juce::dontSendNotification);
         load->onChange = [this, load]
         {
             const int i = load->getSelectedId() - 2;
-            if (i < 0 || i >= int (settings.catalog.sources.size())) return;
-            mesa::loadSource (settings.catalog.sources[size_t (i)], ch);
+            if (i < 0 || i >= int (settings.catalog.sources.size()))
+            {
+                // esvaziar o fader: desliga a fonte sem deixar rastro de
+                // configuracao antiga apontando para lugar nenhum
+                ch.name.clear();
+                ch.params.inputKind .store (int (mesa::InputKind::Device));
+                ch.params.inputIndex.store (-1);
+                ch.params.trigger.enabled.store (false);
+            }
+            else
+            {
+                mesa::loadSource (settings.catalog.sources[size_t (i)], ch);
+            }
+            rebuildTabs();
         };
-        p->addRow ("Carregar canal", load);
+        p->addRow ("Input", load);
 
-        auto* saveDef = new juce::TextButton ("SALVAR AJUSTES NO CANAL");
-        saveDef->onClick = [this]
+        // resumo do que esta carregado, so leitura
+        const auto* def = settings.catalog.find (ch.name);
+        juce::String fonte = "sem fonte";
+        if (def != nullptr)
         {
-            if (auto* def = settings.catalog.find (ch.name))
-                mesa::captureSource (ch, *def);
-        };
-        p->addRow ("", saveDef, 28);
-        p->addNote ("Calibrou o threshold ouvindo? Salve no canal — o ajuste passa a valer "
-                    "em qualquer fader que carregar esse canal depois.");
+            if (def->livewireChannel > 0)
+                fonte = "Livewire " + juce::String (def->livewireChannel)
+                      + (def->livewireSide == 1 ? " (direito)"
+                         : def->livewireSide == 2 ? " (soma estereo)" : " (esquerdo)");
+            else if (! def->streamName.empty())
+                fonte = "NDI " + juce::String (def->streamName);
+            else if (! def->deviceName.empty())
+                fonte = juce::String (def->deviceName) + " entrada "
+                      + juce::String (def->deviceChannel + 1);
+            else if (def->index >= 0)
+                fonte = "placa mestra, entrada " + juce::String (def->index + 1);
+        }
 
-        auto* nameBox = new juce::TextEditor();
-        nameBox->setText (ch.name, juce::dontSendNotification);
-        nameBox->setFont (theme::mono (12.0f));
-        nameBox->onTextChange = [this, nameBox] { ch.name = nameBox->getText().toStdString(); };
-        p->addRow ("Nome", nameBox);
+        static const char* usos[] = { "MIC Operador", "MIC Produtor",
+                                      "MIC Convidado (controle)", "MIC Convidado (estudio)",
+                                      "MIC Externo", "Linha", "Telefone", "Codec",
+                                      "Player de PC", "Feed de Estudio" };
 
-        static const char* types[] = { "Operador", "Produtor", "Convidado CR", "Convidado Estudio",
-                                       "Mic Externo", "Linha", "Telefone", "Codec",
-                                       "Player de PC", "Feed de Estudio" };
-        auto* typeBox = new juce::ComboBox();
-        for (int t = 0; t < 10; ++t) typeBox->addItem (types[t], t + 1);
-        typeBox->setSelectedId (ch.params.sourceType.load() + 1, juce::dontSendNotification);
-        typeBox->onChange = [this, typeBox] { ch.params.sourceType.store (typeBox->getSelectedId() - 1); };
-        p->addRow ("Tipo", typeBox);
-
-        auto* kindBox = new juce::ComboBox();
-        kindBox->addItem ("Placa (ASIO)", 1);
-        kindBox->addItem ("Rede (NDI / AES67)", 2);
-        kindBox->setSelectedId (ch.params.inputKind.load() + 1, juce::dontSendNotification);
-        kindBox->onChange = [this, kindBox] { ch.params.inputKind.store (kindBox->getSelectedId() - 1); };
-        p->addRow ("Origem", kindBox);
-
-        auto* inBox = new juce::ComboBox();
-        inBox->addItem ("sem fonte", 1);
-        for (int k = 0; k < 16; ++k) inBox->addItem ("entrada " + juce::String (k + 1), k + 2);
-        inBox->setSelectedId (ch.params.inputIndex.load() + 2, juce::dontSendNotification);
-        inBox->onChange = [this, inBox] { ch.params.inputIndex.store (inBox->getSelectedId() - 2); };
-        p->addRow ("Entrada", inBox);
+        p->addRow ("Fonte", makeLeitura (fonte));
+        p->addRow ("Uso", makeLeitura (usos[juce::jlimit (0, 9, ch.params.sourceType.load())]));
+        p->addNote ("Para trocar a fonte, o uso ou o trim deste input, va em "
+                    "Configuracoes > Inputs e abra o input pelo nome. O que muda la "
+                    "vale para qualquer fader que o carregar.");
 
         p->addTitle ("Mix-minus");
         p->addNote ("Telefone, codec e feed de estudio recebem backfeed proprio: "
@@ -218,13 +230,21 @@ private:
         return p;
     }
 
+    juce::Label* makeLeitura (const juce::String& v)
+    {
+        auto* l = new juce::Label ({}, v);
+        l->setFont (theme::mono (11.0f));
+        l->setColour (juce::Label::textColourId, theme::oled);
+        return l;
+    }
+
     CfgPage* buildGain()
     {
         auto* p = new CfgPage();
         p->addTitle ("Trim e fader");
         slider (*p, "Trim manual (dB)", ch.params.trimDb.load(), -25.0, 25.0, 0.1,
                 [this] (float v) { ch.params.trimDb.store (v); });
-        slider (*p, "Fader (dB)", ch.params.faderDb.load(), -60.0, 10.0, 0.1,
+        slider (*p, "Fader (dB)", ch.params.faderDb.load(), -60.0, 20.0, 0.1,
                 [this] (float v) { ch.params.faderDb.store (v); });
         slider (*p, "Pan", ch.params.panPos.load(), -1.0, 1.0, 0.01,
                 [this] (float v) { ch.params.panPos.store (v); });
@@ -247,7 +267,7 @@ private:
         p->addNote ("O alvo e RMS; o medidor da tira mostra PICO. Em fala o pico fica "
                     "uns 12 dB acima do RMS: alvo -18 faz a barra bater perto de -6. "
                     "A marca azul na barra OUT mostra onde ele esta mirando.");
-        slider (*p, "Fader maximo (dB)", am.maxFaderDb.load(), -10.0, 10.0, 0.5,
+        slider (*p, "Fader maximo (dB)", am.maxFaderDb.load(), -10.0, 20.0, 0.5,
                 [&am] (float v) { am.maxFaderDb.store (v); });
         slider (*p, "Fader minimo (dB)", am.minFaderDb.load(), -60.0, 0.0, 0.5,
                 [&am] (float v) { am.minFaderDb.store (v); });

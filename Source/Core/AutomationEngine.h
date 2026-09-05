@@ -269,7 +269,6 @@ public:
         wasQuiet = quiet;
 
         // ninguem falando: volta para a camera geral depois do silencio pedido
-        const double quietFor = timeMs - lastActiveMs;
         // ---- conversa cruzada: dois ou mais falando ao mesmo tempo
         //
         // Sem isto a mesa fica alternando entre quem esta mais alto a cada

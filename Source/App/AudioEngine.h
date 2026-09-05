@@ -15,9 +15,27 @@ public:
     ~AudioEngine() override { shutdown(); }
 
     /** Tenta abrir o driver ASIO. Retorna string vazia em caso de sucesso. */
-    juce::String start (int inputs, int outputs)
+    /** estadoSalvo e o XML devolvido por estadoAtual() numa sessao anterior.
+
+        Antes o arranque chamava initialiseWithDefaultDevices, que IGNORA
+        qualquer escolha anterior e abre o dispositivo padrao do Windows. Era
+        por isso que so a placa nao persistia: todo o resto ia para o JSON, mas
+        o dispositivo era redecidido do zero a cada abertura. */
+    juce::String start (int inputs, int outputs, const juce::String& estadoSalvo = {})
     {
         deviceManager.addAudioCallback (this);
+
+        if (estadoSalvo.isNotEmpty())
+        {
+            if (auto xml = juce::XmlDocument::parse (estadoSalvo))
+            {
+                const auto err = deviceManager.initialise (inputs, outputs, xml.get(), true);
+                if (err.isEmpty() && deviceManager.getCurrentAudioDevice() != nullptr)
+                    return {};
+                // se a placa salva sumiu, cai no caminho padrao abaixo em vez
+                // de deixar a mesa muda
+            }
+        }
 
         for (auto* type : deviceManager.getAvailableDeviceTypes())
             if (type->getTypeName() == "ASIO")
@@ -27,6 +45,14 @@ public:
         if (err.isNotEmpty())
             return err;
 
+        return {};
+    }
+
+    /** Estado do dispositivo em XML, para gravar junto das configuracoes. */
+    juce::String estadoAtual() const
+    {
+        if (auto xml = deviceManager.createStateXml())
+            return xml->toString();
         return {};
     }
 

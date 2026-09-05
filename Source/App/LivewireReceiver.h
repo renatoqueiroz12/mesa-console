@@ -22,8 +22,12 @@
 class LivewireReceiver
 {
 public:
-    LivewireReceiver (mesa::AsyncSource& leftQueue, mesa::AsyncSource& rightQueue)
-        : left (leftQueue), right (rightQueue) {}
+    /** somaQueue recebe (L+R)/2. Existe porque o canal da mesa e mono: para
+        fonte estereo — playout com musica, por exemplo — pegar so um lado
+        perderia metade do conteudo. */
+    LivewireReceiver (mesa::AsyncSource& leftQueue, mesa::AsyncSource& rightQueue,
+                      mesa::AsyncSource* somaQueue = nullptr)
+        : left (leftQueue), right (rightQueue), soma (somaQueue) {}
 
     ~LivewireReceiver() { stop(); }
 
@@ -99,7 +103,7 @@ private:
     void pump()
     {
         std::vector<char> buf (2048);
-        std::vector<float> l (512), r (512);
+        std::vector<float> l (512, 0.0f), r (512, 0.0f), m (512, 0.0f);
 
         while (! quit.load())
         {
@@ -122,7 +126,8 @@ private:
             const int frames = payload / 6;                     // 2 canais x 3 bytes
             if (frames <= 0) continue;
 
-            if (int (l.size()) < frames) { l.resize (size_t (frames)); r.resize (size_t (frames)); }
+            if (int (l.size()) < frames)
+            { l.resize (size_t (frames)); r.resize (size_t (frames)); m.resize (size_t (frames)); }
 
             const unsigned char* d = p + offset;
             for (int i = 0; i < frames; ++i)
@@ -133,6 +138,12 @@ private:
 
             left .push (l.data(), frames);
             right.push (r.data(), frames);
+            if (soma != nullptr)
+            {
+                for (int i = 0; i < frames; ++i)
+                    m[size_t (i)] = 0.5f * (l[size_t (i)] + r[size_t (i)]);
+                soma->push (m.data(), frames);
+            }
             packetCount.fetch_add (1);
         }
     }
@@ -150,6 +161,7 @@ private:
 
     mesa::AsyncSource& left;
     mesa::AsyncSource& right;
+    mesa::AsyncSource* soma = nullptr;
     std::unique_ptr<juce::DatagramSocket> socket;
     std::thread worker;
     std::atomic<bool> quit { true };

@@ -91,39 +91,69 @@ public:
         g.setColour (juce::Colours::black.withAlpha (0.55f));
         g.drawRoundedRectangle (r, 3.0f, 1.0f);
 
-        const float top = 16.0f, bottom = r.getHeight() - 16.0f;
+        // Margem maior que a METADE do cap: no fim do curso ele precisa caber
+        // inteiro dentro da caixa, senao some um pedaco.
+        const float top = 34.0f, bottom = r.getHeight() - 34.0f;
         const float travel = bottom - top;
 
+        // eixo do rasgo: a escala se apoia nele
+        const float cx = r.getCentreX() + 11.0f;
+
         // escala numerada
-        static const char* nums[] = { "+10", "0", "-10", "-20", "-30", "-40", "-50", "-\xe2\x88\x9e" };
-        g.setFont (theme::mono (8.0f));
-        g.setColour (juce::Colour (0xff7d8794));
+        static const char* nums[] = { "+20", "+10", "0", "-10", "-20", "-30", "-40", "-\xe2\x88\x9e" };
+        g.setFont (theme::mono (9.0f, true));
+        g.setColour (theme::escalaTexto);
         for (int i = 0; i < 8; ++i)
         {
             const float y = top + travel * (float (i) / 7.0f);
             g.drawText (juce::String::fromUTF8 (nums[i]),
-                        juce::Rectangle<float> (4.0f, y - 5.0f, 24.0f, 10.0f),
+                        juce::Rectangle<float> (2.0f, y - 6.0f, 24.0f, 12.0f),
                         juce::Justification::centredLeft, false);
-            g.setColour (juce::Colour (0xff4c5560));
-            g.fillRect (r.getRight() - 9.0f, y - 0.5f, 6.0f, 1.0f);
-            g.setColour (juce::Colour (0xff7d8794));
+            // Traco encostado no rasgo, do lado do numero: e assim que se le
+            // posicao de fader sem tirar o olho do cap.
+            g.setColour (theme::escalaTraco);
+            g.fillRect (cx - 21.0f, y - 0.7f, 12.0f, 1.4f);
+
+            // dois tracos curtos entre um rotulo e o proximo, como regua
+            if (i < 7)
+                for (int k = 1; k <= 2; ++k)
+                {
+                    const float ym = y + (travel / 7.0f) * (float (k) / 3.0f);
+                    g.setColour (theme::escalaTraco.withAlpha (0.5f));
+                    g.fillRect (cx - 16.0f, ym - 0.5f, 7.0f, 1.0f);
+                }
+            g.setColour (theme::escalaTexto);
         }
 
         // rasgo
-        const float cx = r.getCentreX() + 8.0f;
         g.setColour (theme::slot);
         g.fillRoundedRectangle (cx - 3.0f, top, 6.0f, travel, 2.0f);
 
         // cap
         const float y = top + travel * (1.0f - pos);
-        juce::Rectangle<float> cap (cx - 17.0f, y - 11.0f, 34.0f, 22.0f);
+        // Cap retangular e alto, como o da Axia: alvo generoso para o dedo e
+        // silhueta que se acha de relance. Sem contorno colorido — a cor do
+        // proprio cap ja destaca, e borda ambar competia com a tally.
+        // Retangulo em pe, na proporcao do cap da Axia: mais alto que largo.
+        // O nosso estava quase quadrado e nao lia como fader.
+        juce::Rectangle<float> cap (cx - 20.0f, y - 31.0f, 40.0f, 62.0f);
         g.setGradientFill (juce::ColourGradient (theme::capTop, 0.0f, cap.getY(),
                                                  theme::capBot, 0.0f, cap.getBottom(), false));
-        g.fillRoundedRectangle (cap, 3.0f);
-        g.setColour (juce::Colours::black);
-        g.drawRoundedRectangle (cap, 3.0f, 1.0f);
-        g.setColour (juce::Colours::black.withAlpha (0.55f));
-        g.fillRect (cap.getX() + 3.0f, cap.getCentreY() - 1.0f, cap.getWidth() - 6.0f, 2.0f);
+        g.fillRoundedRectangle (cap, 2.5f);
+        g.setColour (juce::Colours::black.withAlpha (0.65f));
+        g.drawRoundedRectangle (cap, 2.5f, 1.0f);
+
+        // risco central: a linha que o operador usa para ler a posicao
+        // risco central: a linha por onde se le a posicao
+        g.setColour (theme::capRisco);
+        g.fillRect (cap.getX() + 3.0f, cap.getCentreY() - 1.5f, cap.getWidth() - 6.0f, 3.0f);
+
+        // sulcos de pega, distribuidos na altura
+        g.setColour (juce::Colours::black.withAlpha (0.28f));
+        for (int k = -2; k <= 2; ++k)
+            if (k != 0)
+                g.fillRect (cap.getX() + 7.0f, cap.getCentreY() + float (k) * 9.0f - 0.75f,
+                            cap.getWidth() - 14.0f, 1.5f);
     }
 
     void mouseDown (const juce::MouseEvent& e) override { drag (e); }
@@ -154,7 +184,7 @@ public:
           autoBtn ("AUTO", theme::wide, 10.0f),
           preview ("PREV", theme::prev),
           bigOn ("ON", theme::onRed, 15.0f),
-          bigOff ("OFF", juce::Colour (0xff414852), 15.0f)
+          bigOff ("OFF", theme::offLaranja, 15.0f)
     {
         soft.onClick = [this, onSoft] { if (onSoft) onSoft (index); };
         addAndMakeVisible (soft);
@@ -265,18 +295,14 @@ public:
                             : juce::String ("SEM AUTOMACAO"),
                     o.removeFromTop (13), juce::Justification::centredLeft, false);
 
-        // ---- medidores de entrada: IN (o que o trigger enxerga) e pos-trim
-        theme::drawOled (g, meterArea, 3.0f);
-        auto m = meterArea.reduced (6, 6);
-        drawMeterRow (g, m.removeFromTop (9), "IN",
-                      ch.tapDb (mesa::TapPoint::Input), true);
-        m.removeFromTop (4);
-        // Segundo medidor: o que o canal REALMENTE entrega ao sistema, ja com
-        // o fader. E o par natural do de entrada: um mostra o que chega, outro
-        // o que sai.
-        drawMeterRow (g, m.removeFromTop (9), "OUT",
-                      ch.tapDb (mesa::TapPoint::PostFader), false,
-                      ch.params.autoMix.enabled.load());
+        // ---- medidores VERTICAIS, ladeando o fader
+        //
+        // Antes eram duas barrinhas horizontais acima do fader, curtas demais
+        // para julgar nivel. Na vertical acompanham o curso do fader e ficam no
+        // campo de visao de quem opera, que e onde a mao ja esta.
+        drawVerticalMeter (g, meterInArea,  ch.tapDb (mesa::TapPoint::Input), true, false);
+        drawVerticalMeter (g, meterOutArea, ch.tapDb (mesa::TapPoint::PostFader), false,
+                           ch.params.autoMix.enabled.load());
 
         // ---- leitura do fader
         g.setColour (theme::faderWell);
@@ -347,14 +373,14 @@ public:
     {
         auto r = getLocalBounds().reduced (6, 7);
 
-        oledArea = r.removeFromTop (58);
+        oledArea = r.removeFromTop (66);
         r.removeFromTop (6);
 
-        soft.setBounds (r.removeFromTop (26));
+        soft.setBounds (r.removeFromTop (30));
         r.removeFromTop (6);
 
-        auto busTop = r.removeFromTop (30);
-        auto busBottom = r.removeFromTop (30).withTrimmedTop (5);
+        auto busTop = r.removeFromTop (34);
+        auto busBottom = r.removeFromTop (34).withTrimmedTop (5);
         const int halfW = (busTop.getWidth() - 5) / 2;
         bus[0]->setBounds (busTop.removeFromLeft (halfW));
         bus[1]->setBounds (busTop.removeFromRight (halfW));
@@ -362,35 +388,101 @@ public:
         bus[3]->setBounds (busBottom.removeFromRight (halfW));
         r.removeFromTop (6);
 
-        auto prevRow = r.removeFromTop (28);
-        autoBtn.setBounds (prevRow.removeFromRight (56));
+        auto prevRow = r.removeFromTop (32);
+        autoBtn.setBounds (prevRow.removeFromRight (64));
         prevRow.removeFromRight (4);
         preview.setBounds (prevRow);
         r.removeFromTop (6);
 
-        meterArea = r.removeFromTop (40);
-        r.removeFromTop (6);
 
-        // de baixo para cima: trigger, ON/OFF, leitura. O resto e do fader.
-        trigRow = r.removeFromBottom (18);
-        r.removeFromBottom (5);
-        auto onoff = r.removeFromBottom (72);
-        bigOn .setBounds (onoff.removeFromTop (35));
-        bigOff.setBounds (onoff.removeFromBottom (35));
-        r.removeFromBottom (5);
-        dbReadout = r.removeFromBottom (18);
+        // RODAPE DA TIRA, como na Axia: leitura, ON, OFF e tally atravessam a
+        // largura toda, abaixo do fader. Botao de largura cheia e mais facil
+        // de acertar sem olhar — e ON/OFF e o que a mao mais usa no ar.
+        //
+        // Sobrou altura para isso porque a faixa inferior da mesa saiu: o que
+        // era rodape da JANELA virou rodape da TIRA, onde ele pertence.
+        trigRow = r.removeFromBottom (22);
         r.removeFromBottom (4);
+        bigOff.setBounds (r.removeFromBottom (60));
+        r.removeFromBottom (4);
+        bigOn .setBounds (r.removeFromBottom (60));
+        r.removeFromBottom (4);
+        dbReadout = r.removeFromBottom (24);
+        r.removeFromBottom (6);
 
-        fader.setBounds (r.withSizeKeepingCentre (juce::jmin (r.getWidth(), 74), r.getHeight()));
+        // par de medidores colado ao fader, ocupando a altura restante
+        auto meters = r.removeFromRight (34);
+        meterInArea  = meters.removeFromLeft (16);
+        meters.removeFromLeft (2);
+        meterOutArea = meters.removeFromLeft (16);
+        r.removeFromRight (4);
+
+        fader.setBounds (r);
     }
 
 private:
+    /** Medidor vertical na escala de OPERACAO: verde ate 0, ambar ate +10,
+        vermelho acima. Le em dBFS e converte — o operador nunca ve dBFS. */
+    void drawVerticalMeter (juce::Graphics& g, juce::Rectangle<int> area,
+                            float dbfs, bool comThreshold, bool comAlvoAuto)
+    {
+        auto r = area.toFloat();
+        g.setColour (juce::Colour (0xff0a1014));
+        g.fillRect (r);
+
+        auto corpo = r.reduced (1.0f, 1.0f);
+        const float vu = theme::dbfsToVu (dbfs);
+
+        // Cor por SEGMENTO, nao pela barra inteira: verde ate 0, ambar de 0 a
+        // +10, vermelho acima. Pintar tudo da cor do pico esconderia onde o
+        // sinal esta — o operador leria "esta vermelho" em vez de "passou de
+        // 0 ha pouco".
+        auto pinta = [&] (float de, float ate, juce::Colour c)
+        {
+            const float topo = juce::jmin (vu, ate);
+            if (topo <= de) return;
+            const float y1 = theme::vuToY (de, corpo);
+            const float y2 = theme::vuToY (topo, corpo);
+            g.setColour (c);
+            g.fillRect (corpo.getX(), y2, corpo.getWidth(), y1 - y2);
+        };
+        pinta (theme::kMeterBotVu, 0.0f,  theme::meterVerde);
+        pinta (0.0f, 10.0f,               theme::meterAmbar);
+        pinta (10.0f, theme::kMeterTopVu, theme::meterVermelho);
+
+        // serigrafia de segmentos, como painel de LED
+        g.setColour (juce::Colour (0xff0a1014));
+        for (float y = corpo.getY(); y < corpo.getBottom(); y += 4.0f)
+            g.fillRect (corpo.getX(), y, corpo.getWidth(), 1.0f);
+
+        // marca do 0
+        g.setColour (juce::Colours::white.withAlpha (0.5f));
+        const float y0 = theme::vuToY (0.0f, corpo);
+        g.fillRect (corpo.getX(), y0 - 0.5f, corpo.getWidth(), 1.0f);
+
+        if (comThreshold)
+        {
+            g.setColour (theme::trig);
+            const float y = theme::vuToY (theme::dbfsToVu (ch.params.trigger.thresholdDb.load()), corpo);
+            g.fillRect (r.getX() - 1.0f, y - 1.0f, r.getWidth() + 2.0f, 2.0f);
+        }
+        if (comAlvoAuto)
+        {
+            g.setColour (theme::wide);
+            const float y = theme::vuToY (theme::dbfsToVu (ch.params.autoMix.targetDb.load()), corpo);
+            g.fillRect (r.getX() - 1.0f, y - 1.0f, r.getWidth() + 2.0f, 2.0f);
+        }
+
+        g.setColour (juce::Colours::black.withAlpha (0.7f));
+        g.drawRect (r, 1.0f);
+    }
+
     void drawMeterRow (juce::Graphics& g, juce::Rectangle<int> row,
                        const char* label, float db, bool withThreshold,
                        bool withAutoTarget = false)
     {
         g.setColour (theme::oledDim);
-        g.setFont (theme::mono (8.0f));
+        g.setFont (theme::mono (9.0f, true));
         g.drawText (label, row.removeFromLeft (28), juce::Justification::centredLeft, false);
         row.removeFromLeft (4);
 
@@ -423,7 +515,7 @@ private:
     SurfaceButton soft, autoBtn, preview, bigOn, bigOff;
     std::unique_ptr<SurfaceButton> bus[4];
     FaderComponent fader;
-    juce::Rectangle<int> oledArea, meterArea, dbReadout, trigRow;
+    juce::Rectangle<int> oledArea, meterInArea, meterOutArea, dbReadout, trigRow;
     mesa::TriggerState trigState = mesa::TriggerState::Idle;
     bool onAir = false;
     float lastFaderDb = -1000.0f;
