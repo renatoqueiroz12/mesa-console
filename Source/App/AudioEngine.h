@@ -105,6 +105,29 @@ public:
                        outputChannelData, numOutputChannels, numSamples,
                        numNet > 0 ? netPtr.data() : nullptr, numNet);
 
+        // gravador de diagnostico: entrada crua, antes de qualquer coisa nossa
+        {
+            const int cg = canalGravado.load (std::memory_order_relaxed);
+            const int pt = pontoGravacao.load (std::memory_order_relaxed);
+
+            if (aoGravar)
+            {
+                if (pt == 2)                       // programa, independe de canal
+                    aoGravar (mixer.busLeft (0), numSamples);
+                else if (cg >= 0 && cg < mixer.numChannels())
+                    aoGravar (pt == 1 ? mixer.channel (cg).processedData()
+                                      : mixer.channel (cg).entradaBruta(), numSamples);
+            }
+        }
+
+        // transcricao em tempo real: entrada crua, o texto do que foi dito nao
+        // deve depender de fader nem de DSP
+        {
+            const int ct = canalTranscricao.load (std::memory_order_relaxed);
+            if (ct >= 0 && ct < mixer.numChannels() && aoTranscrever)
+                aoTranscrever (mixer.channel (ct).entradaBruta(), numSamples);
+        }
+
         // saidas assincronas: copia o barramento escolhido para a fila do
         // destino. Escrita em fila SPSC — nao bloqueia, nao aloca.
         for (int i = 0; i < kMaxNetSinks; ++i)
@@ -133,6 +156,39 @@ public:
         // decide cortes e enfileira comandos. Nao abre socket, nao aloca, nao trava.
         automation.processBlock (mixer, blockMs.load (std::memory_order_relaxed));
 
+        // PICO DO QUE SAI DE FATO PARA A PLACA.
+        //
+        // Medido depois de tudo — mix, pan, ganho de barramento — no proprio
+        // buffer que o driver recebe. E o unico numero que separa "a mesa
+        // entrega baixo" de "a mesa entrega certo e o driver atenua". Sem ele,
+        // ajustar nivel vira adivinhacao.
+        {
+            // POR CANAL, e nao o maior de todos.
+            //
+            // O pico geral nao serve para achar roteamento errado: se o som
+            // sai cheio na saida 3 e a caixa esta na 1, ele marca cheio do
+            // mesmo jeito e nada parece errado. Por canal, o silencio aparece
+            // exatamente onde esta.
+            float geral = 0.0f;
+            for (int ch = 0; ch < numOutputChannels && ch < kMaxCanaisMedidos; ++ch)
+            {
+                float pico = 0.0f;
+                if (outputChannelData[ch] != nullptr)
+                    for (int i = 0; i < numSamples; ++i)
+                        pico = juce::jmax (pico, std::abs (outputChannelData[ch][i]));
+
+                const float anterior = picoCanal[size_t (ch)].load (std::memory_order_relaxed);
+                picoCanal[size_t (ch)].store (juce::jmax (pico, anterior * 0.9995f),
+                                              std::memory_order_relaxed);
+                geral = juce::jmax (geral, pico);
+            }
+
+            canaisSaida.store (numOutputChannels, std::memory_order_relaxed);
+            const float anterior = picoSaida.load (std::memory_order_relaxed);
+            picoSaida.store (juce::jmax (geral, anterior * 0.9995f),
+                             std::memory_order_relaxed);
+        }
+
         const double elapsed = juce::Time::highResolutionTicksToSeconds (
                                    juce::Time::getHighResolutionTicks() - t0);
         const double budget  = numSamples / sampleRate.load();
@@ -154,12 +210,27 @@ public:
     std::atomic<int>    blockSize  { 0 };
     std::atomic<float>  latencyMs  { 0.0f };
     std::atomic<float>  cpuLoad    { 0.0f };
+    /** Pico das amostras entregues a placa, em escala linear. */
+    std::atomic<float>  picoSaida  { 0.0f };
+    static constexpr int kMaxCanaisMedidos = 16;
+    std::array<std::atomic<float>, kMaxCanaisMedidos> picoCanal {};
+    std::atomic<int>    canaisSaida { 0 };
 
     /** Slots de fonte assincrona: NDI e placas secundarias. O canal aponta para
         um slot pelo inputIndex quando o inputKind e Network. Ponteiro atomico
         porque a UI troca a fonte com o audio rodando. */
     static constexpr int kMaxNetSlots = 32;
     std::array<std::atomic<mesa::AsyncSource*>, kMaxNetSlots> netSlot {};
+
+    /** Canal cuja ENTRADA CRUA vai para o gravador. -1 desliga. */
+    std::atomic<int> canalGravado { -1 };
+    /** 0 = entrada crua, 1 = pos-fader, 2 = PGM 1. */
+    std::atomic<int> pontoGravacao { 0 };
+    std::function<void (const float*, int)> aoGravar;
+
+    /** Canal cuja entrada vai para a transcricao continua. -1 desliga. */
+    std::atomic<int> canalTranscricao { -1 };
+    std::function<void (const float*, int)> aoTranscrever;
 
     void setNetSlot (int i, mesa::AsyncSource* q) noexcept
     {

@@ -1,4 +1,5 @@
 #pragma once
+#include "../Core/NomeDaThread.h"
 #include <juce_core/juce_core.h>
 #include "../Core/AsyncSource.h"
 #include <atomic>
@@ -37,7 +38,7 @@ public:
              + "." + juce::String (canal & 0xff);
     }
 
-    bool start (int numero, double sampleRate = 48000.0)
+    bool start (int numero, double sampleRate = 48000.0, const juce::String& localIp = {})
     {
         stop();
         if (numero <= 0 || numero > 32767) { erro = "canal fora da faixa 1..32767"; return false; }
@@ -47,7 +48,11 @@ public:
         sr = sampleRate;
 
         socket = std::make_unique<juce::DatagramSocket> (true);
-        if (! socket->bindToPort (0))
+        // mesma razao da recepcao: numa maquina com varias placas, sair pela
+        // errada e o mesmo que nao transmitir
+        const bool ok = localIp.isNotEmpty() ? socket->bindToPort (0, localIp)
+                                             : socket->bindToPort (0);
+        if (! ok)
         {
             erro = "nao consegui abrir socket de saida";
             socket = nullptr;
@@ -85,6 +90,9 @@ private:
 
     void loop()
     {
+        // se cair, o log da queda diz o nome em vez de "(sem nome)"
+        mesa::batizaThread ("livewire-tx");
+
         std::vector<unsigned char> pacote (size_t (kCabec + kCarga), 0);
         // O segundo argumento nao e enfeite: sem ele o compilador le isto como
         // DECLARACAO DE FUNCAO, nao de vetor.

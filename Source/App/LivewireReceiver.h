@@ -1,4 +1,5 @@
 #pragma once
+#include "../Core/NomeDaThread.h"
 #include <juce_core/juce_core.h>
 #include "../Core/AsyncSource.h"
 #include <atomic>
@@ -51,6 +52,27 @@ public:
 
         socket = std::make_unique<juce::DatagramSocket> (false);
         socket->setEnablePortReuse (true);
+
+        // POR QUAL PLACA entrar no grupo.
+        //
+        // Numa maquina com mais de uma placa de rede — o que e a regra em
+        // estudio — o Windows escolhe sozinho por onde pedir o multicast, e
+        // costuma escolher errado. O resultado e um receptor que abre sem erro
+        // nenhum e nunca recebe um pacote: parece defeito de codigo e e
+        // roteamento.
+        //
+        // Todo software de AoIP pergunta isso; o painel da propria Axia tem o
+        // campo "Livewire Network Card". Faltava aqui.
+        // AMARRA SO A PORTA, nunca ao endereco da placa.
+        //
+        // Amarrar em 192.168.2.11 parecia mais correto e era a origem do
+        // sintoma mais estranho desta semana: audio vindo do QOR entrava, e o
+        // mesmo audio gerado por um programa NESTA maquina nao entrava nunca.
+        // Socket de multicast preso a um endereco unicast deixa de receber o
+        // trafego que nasce na propria maquina.
+        //
+        // A escolha da placa nao se perde: ela vale na entrada do grupo,
+        // abaixo, que e onde ela realmente importa.
         if (! socket->bindToPort (kPort))
         {
             lastError = "nao consegui abrir a porta " + juce::String (kPort)
@@ -58,15 +80,25 @@ public:
             socket = nullptr;
             return false;
         }
+
         if (! socket->joinMulticast (group))
         {
             lastError = "nao consegui entrar no grupo " + group
-                      + " (a mesa esta na VLAN do Livewire? IGMP liberado no switch?)";
+                      + (localIp.isNotEmpty() ? " pela placa " + localIp
+                                              : juce::String (" (placa escolhida pelo Windows)"))
+                      + " — VLAN do Livewire? IGMP no switch?";
             socket = nullptr;
             return false;
         }
-        if (localIp.isNotEmpty())
-            socket->setMulticastLoopbackEnabled (false);
+        // LOOPBACK LIGADO.
+        //
+        // Sem isto, multicast que nasce na PROPRIA maquina nao chega ao nosso
+        // socket. Foi exatamente o sintoma: as fontes do QOR entravam (vem de
+        // fora, pela rede) e o canal do driver da Axia rodando aqui do lado
+        // nao entrava nunca. Parecia defeito de Livewire e era so isto.
+        socket->setMulticastLoopbackEnabled (true);
+
+        placaUsada = localIp;
 
         lastError.clear();
         quit.store (false);
@@ -87,6 +119,7 @@ public:
     int  channel() const noexcept { return chan; }
     juce::String address() const { return group; }
     juce::String error() const { return lastError; }
+    juce::String placa() const { return placaUsada.isEmpty() ? "(escolhida pelo Windows)" : placaUsada; }
     int  packets() const noexcept { return packetCount.load(); }
     bool receiving() const noexcept { return packetCount.load() > lastSeen; }
 
@@ -102,6 +135,9 @@ public:
 private:
     void pump()
     {
+        // se cair, o log da queda diz o nome em vez de "(sem nome)"
+        mesa::batizaThread ("livewire-rx");
+
         std::vector<char> buf (2048);
         std::vector<float> l (512, 0.0f), r (512, 0.0f), m (512, 0.0f);
 
@@ -167,7 +203,7 @@ private:
     std::atomic<bool> quit { true };
     std::atomic<int> packetCount { 0 };
     int lastSeen = 0, chan = 0;
-    juce::String group, lastError;
+    juce::String group, lastError, placaUsada;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LivewireReceiver)
 };

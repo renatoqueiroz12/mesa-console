@@ -1,4 +1,5 @@
 #pragma once
+#include "../Core/NomeDaThread.h"
 #include <juce_core/juce_core.h>
 #include "../Core/AsyncSource.h"
 #include <atomic>
@@ -172,6 +173,7 @@ public:
 private:
     void findLoop()
     {
+        mesa::batizaThread ("ndi-findLoop");
         while (! quit.load())
         {
             // espera ate 1 s por mudanca na rede; nao queima CPU
@@ -307,6 +309,7 @@ private:
 #if MESA_HAS_NDI
     void pumpLoop()
     {
+        mesa::batizaThread ("ndi-pumpLoop");
         auto* lib = NdiEngine::instance().api();
         std::vector<float> mono (size_t (block), 0.0f);
 
@@ -319,17 +322,31 @@ private:
 
             if (frame.p_data != nullptr && frame.no_samples > 0)
             {
+                // Empurra SO o que veio, sem completar com silencio.
+                //
+                // Preencher o resto do bloco com zeros metia um buraco no meio
+                // do audio a cada quadro curto — e nenhum contador acusava,
+                // porque o bloco ia cheio. O som saia picotado e metalico com
+                // a fila reportando saude perfeita. Faltando amostra, quem
+                // decide o que fazer e a fila, que sabe o seu proprio estado.
                 const int n = frame.no_samples < block ? frame.no_samples : block;
                 std::memcpy (mono.data(), frame.p_data, size_t (n) * sizeof (float));
-                for (int i = n; i < block; ++i) mono[size_t (i)] = 0.0f;
-                dst.push (mono.data(), block);
+                dst.push (mono.data(), n);
                 ultimoMs = juce::Time::getMillisecondCounterHiRes();
                 recebidos.fetch_add (1);
             }
             lib->framesync_free_audio (sync, &frame);
 
-            // ritmo do bloco: dorme um pouco menos para a fila nao secar
-            const int ms = int (1000.0 * double (block) / sr * 0.5);
+            // Ritmo REAL do bloco, no ritmo do relogio.
+            //
+            // Dormia metade do tempo e pedia um bloco inteiro a cada volta:
+            // empurrava o dobro do tempo real, a fila transbordava e o
+            // excedente era descartado. "Dormir um pouco menos para nao secar"
+            // parecia prudente e era justamente a causa do picotado.
+            //
+            // A folga contra secar nao vem de empurrar mais, vem do tamanho da
+            // fila — e ela ja tem margem para isso.
+            const int ms = int (1000.0 * double (block) / sr);
             std::this_thread::sleep_for (std::chrono::milliseconds (ms > 1 ? ms : 1));
         }
     }
@@ -412,6 +429,7 @@ private:
 #if MESA_HAS_NDI
     void sendLoop()
     {
+        mesa::batizaThread ("ndi-sendLoop");
         auto* lib = NdiEngine::instance().api();
         std::vector<float> inter (size_t (block * chans), 0.0f);
         std::vector<float> planar (size_t (block * chans), 0.0f);

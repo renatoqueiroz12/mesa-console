@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <juce_audio_devices/juce_audio_devices.h>
 #include "../Core/AsyncSource.h"
 #include <atomic>
@@ -45,6 +46,9 @@ public:
     }
 
     const juce::String& deviceName() const noexcept { return name; }
+    /** Nome real aberto: com "*PADRAO*" ele muda conforme o Windows. */
+    const juce::String& deviceNameReal() const noexcept
+    { return resolvido.isEmpty() ? name : resolvido; }
     int numInputs() const noexcept { return channels; }
     bool isLost() const noexcept { return lost.load(); }
 
@@ -69,6 +73,34 @@ public:
         esta fora. Serve para o operador saber se e cabo ruim ou caso isolado. */
     int  dropouts() const noexcept { return drops.load(); }
     double sampleRate() const noexcept { return actualRate; }
+    int  blocos() const noexcept { return blocosRecebidos.load(); }
+    long long amostras() const noexcept { return amostrasRecebidas.load(); }
+    bool recebendo() const noexcept { return blocosRecebidos.load() > 0; }
+
+    /** Amostras que CHEGARAM por segundo, medidas de verdade.
+
+        A taxa que o dispositivo declara e a que ele entrega podem divergir —
+        e quando divergem, a fila seca e o audio sai picotado sem que nenhum
+        contador de erro acuse nada. Comparar este numero com a taxa declarada
+        e a forma direta de ver isso. */
+    double amostrasPorSegundo() noexcept
+    {
+        const double agora = juce::Time::getMillisecondCounterHiRes();
+        const long long total = amostrasRecebidas.load();
+
+        if (ultimaMedidaMs <= 0.0) { ultimaMedidaMs = agora; ultimoTotal = total; return 0.0; }
+
+        const double dt = (agora - ultimaMedidaMs) / 1000.0;
+        if (dt < 0.5) return ultimaTaxa;
+
+        ultimaTaxa = double (total - ultimoTotal) / dt;
+        ultimaMedidaMs = agora;
+        ultimoTotal = total;
+        return ultimaTaxa;
+    }
+
+    int canaisAtivos() const noexcept { return channels; }
+    int blocoDoDispositivo() const noexcept { return blocoDisp; }
 
     /** Falhas de fila desde a abertura. No modo de latencia minima este numero
         e o juiz: se sobe durante a operacao, a fila esta rasa demais. */
@@ -76,8 +108,37 @@ public:
     {
         std::lock_guard<std::mutex> g (mutex);
         int t = 0;
-        for (auto& q : queues) if (q != nullptr) t += q->underruns() + q->overflows();
-        for (auto& q : sinks)  if (q != nullptr) t += q->underruns() + q->overflows();
+        for (auto& q : queues) if (q != nullptr) t += q->faltas() + q->overflows();
+        for (auto& q : sinks)  if (q != nullptr) t += q->faltas() + q->overflows();
+        return t;
+    }
+
+    /** Separado, porque as causas sao OPOSTAS: fila vazia pede mais folga,
+        fila cheia pede menos. Somar os dois esconde qual e o problema. */
+    int faltas()
+    {
+        std::lock_guard<std::mutex> g (mutex);
+        int t = 0;
+        for (auto& q : queues) if (q != nullptr) t += q->faltas();
+        for (auto& q : sinks)  if (q != nullptr) t += q->faltas();
+        return t;
+    }
+
+    /** Amostras que viraram buraco no audio. E o numero que casa com o ouvido. */
+    int buracos()
+    {
+        std::lock_guard<std::mutex> g (mutex);
+        int t = 0;
+        for (auto& q : queues) if (q != nullptr) t += q->amostrasEmFalta();
+        for (auto& q : sinks)  if (q != nullptr) t += q->amostrasEmFalta();
+        return t;
+    }
+    int descartes()
+    {
+        std::lock_guard<std::mutex> g (mutex);
+        int t = 0;
+        for (auto& q : queues) if (q != nullptr) t += q->overflows();
+        for (auto& q : sinks)  if (q != nullptr) t += q->overflows();
         return t;
     }
 
@@ -107,9 +168,26 @@ private:
         if (t == nullptr) { markLost(); return; }
 
         t->scanForDevices();
-        if (! t->getDeviceNames (true).contains (name)) { markLost(); return; }
 
-        std::unique_ptr<juce::AudioIODevice> d (t->createDevice ({}, name));
+        // "*PADRAO*" nao e nome de placa: e um pedido para usar a que o
+        // Windows estiver usando agora. Resolvido aqui, na abertura, e nao na
+        // configuracao — assim continua valendo depois de trocar o dispositivo
+        // padrao no Windows, sem mexer na mesa.
+        if (name == "*PADRAO*")
+        {
+            const auto nomes = t->getDeviceNames (true);
+            const int padrao = t->getDefaultDeviceIndex (true);
+            if (padrao < 0 || padrao >= nomes.size())
+            { lastError = "o Windows nao tem entrada padrao"; markLost(); return; }
+            resolvido = nomes[padrao];
+        }
+        else
+        {
+            resolvido = name;
+            if (! t->getDeviceNames (true).contains (name)) { markLost(); return; }
+        }
+
+        std::unique_ptr<juce::AudioIODevice> d (t->createDevice ({}, resolvido));
         if (d == nullptr) { markLost(); return; }
 
         juce::BigInteger ins, outs;
@@ -139,6 +217,16 @@ private:
         {
             std::lock_guard<std::mutex> g (mutex);
             channels = d->getActiveInputChannels().countNumberOfSetBits();
+
+            // A fila tem que caber o bloco DE QUEM ENTREGA, nao o da placa
+            // mestra. Com a UMC em 8 amostras e o WASAPI entregando 480 de
+            // uma vez, cabiam 32 e chegavam 480: transbordava em todo bloco e
+            // o audio passava picotado. Foi o que produziu aqueles milhoes de
+            // falhas no batimento.
+            const int blocoDoDispositivo = juce::jmax (d->getCurrentBufferSizeSamples(), 64);
+            const int blocoFila = juce::jmax (block, blocoDoDispositivo * 2, 512);
+            blocoDisp = blocoDoDispositivo;
+
             queues.clear();
             queues.reserve (size_t (channels));
             for (int i = 0; i < channels; ++i)
@@ -147,7 +235,7 @@ private:
                 // Profundidade da fila = LATENCIA desta placa. O ASIO entrega em
                 // ritmo regular e aceita fila rasa; o WASAPI compartilhado chega
                 // em rajadas e precisa de folga, senao pipoca underrun.
-                q->prepare (block, queueBlocks(), sr, queueFill());
+                q->prepare (blocoFila, queueBlocks(), sr, queueFill());
                 // ESSENCIAL: a placa pode estar em 44100 com a mesa em 48000.
                 // Sem informar isso, a correcao de deriva nao da conta e o
                 // audio sai distorcido.
@@ -156,15 +244,20 @@ private:
                 q->kind = mesa::AsyncSource::Kind::Local;
                 queues.push_back (std::move (q));
             }
+            // no comeco todas sao alimentadas: so depois da primeira
+            // verificacao sabemos quais estao sendo lidas
+            filaLida.assign (queues.size(), true);
+            contaBlocos = 0;
             // filas de SAIDA. A conversao de taxa mora do lado de quem consome:
             // a mesa empurra na taxa dela, a placa puxa na taxa dela.
             outChannels = int (outNames);
+            juce::ignoreUnused (blocoDoDispositivo);
             sinks.clear();
             sinks.reserve (size_t (outChannels));
             for (int i = 0; i < outChannels; ++i)
             {
                 auto q = std::make_unique<mesa::AsyncSource>();
-                q->prepare (block, queueBlocks(), actualRate, queueFill());  // taxa de quem PUXA
+                q->prepare (blocoFila, queueBlocks(), actualRate, queueFill());  // taxa de quem PUXA
                 q->setSourceSampleRate (sr);               // taxa de quem EMPURRA
                 q->name = (name + " out " + juce::String (i + 1)).toStdString();
                 sinks.push_back (std::move (q));
@@ -174,6 +267,8 @@ private:
             device = std::move (d);
         }
 
+        blocosRecebidos.store (0);
+        amostrasRecebidas.store (0);
         device->start (this);
 
         const bool was = lost.exchange (false);
@@ -215,12 +310,24 @@ private:
     int queueBlocks() const noexcept
     {
         if (isAsio()) return mode == 0 ? 2 : mode == 1 ? 4 : 8;
-        return mode == 0 ? 4 : mode == 1 ? 8 : 16;
+        return mode == 0 ? 12 : mode == 1 ? 16 : 24;
     }
+
+    /** Quanto da fila fica cheia em regime.
+
+        O WASAPI compartilhado nao entrega em ritmo constante: manda uma
+        rajada, silencia, manda duas juntas. Segurar so 25% deixava a fila
+        secar entre rajadas. Com metade, ela atravessa o intervalo — ao custo
+        de alguns milissegundos a mais, que neste caminho nao fazem falta. */
     double queueFill() const noexcept
     {
-        if (isAsio()) return mode == 0 ? 0.25 : mode == 1 ? 0.25 : 0.35;
-        return mode == 0 ? 0.25 : mode == 1 ? 0.35 : 0.5;
+        if (isAsio()) return mode == 0 ? 0.25 : mode == 1 ? 0.3 : 0.4;
+
+        // WASAPI segura MEIA fila e ainda assim secava entre rajadas: o audio
+        // gravado saia com buracos de 6 ms, um por periodo de entrega. O
+        // remedio nao e sutil — e folga. Estes milissegundos a mais nao fazem
+        // falta neste caminho, e buraco no audio inviabiliza transcricao.
+        return mode == 0 ? 0.6 : mode == 1 ? 0.65 : 0.7;
     }
 
     juce::AudioIODeviceType* makeType() const
@@ -250,9 +357,28 @@ private:
                 juce::FloatVectorOperations::clear (out[c], n);
         }
 
+        // So alimenta fila que alguem esta lendo. A verificacao e barata e
+        // roda uma vez a cada 100 blocos: fila orfa de dispositivo estereo
+        // gerava milhares de descartes por minuto sem servir para nada.
+        if (++contaBlocos >= 100)
+        {
+            contaBlocos = 0;
+            for (size_t i = 0; i < queues.size(); ++i)
+                if (queues[i] != nullptr)
+                    filaLida[i] = queues[i]->temConsumidor();
+        }
+
         for (int c = 0; c < numIn && c < int (queues.size()); ++c)
-            if (in[c] != nullptr && queues[size_t (c)] != nullptr)
+            if (in[c] != nullptr && queues[size_t (c)] != nullptr
+                && (filaLida.size() <= size_t (c) || filaLida[size_t (c)]))
                 queues[size_t (c)]->push (in[c], n);
+
+        // Prova de vida do dispositivo. Sem isto, "fila com milhoes de falhas"
+        // e ambiguo: pode ser fila mal dimensionada ou dispositivo que abriu e
+        // nunca entregou nada. Contando os blocos que CHEGARAM, a diferenca
+        // fica obvia.
+        blocosRecebidos.fetch_add (1, std::memory_order_relaxed);
+        amostrasRecebidas.fetch_add (n, std::memory_order_relaxed);
     }
 
     void audioDeviceAboutToStart (juce::AudioIODevice*) override {}
@@ -272,7 +398,7 @@ private:
         open();          // se a placa voltou, o audio volta sozinho
     }
 
-    juce::String type, name;
+    juce::String type, name, resolvido;
     double sr;
     int block;
     int mode = 0;
@@ -284,10 +410,17 @@ private:
     std::vector<std::unique_ptr<mesa::AsyncSource>> queues;   // entradas
     std::vector<std::unique_ptr<mesa::AsyncSource>> sinks;    // saidas
     int outChannels = 0;
+    std::vector<char> filaLida;      // char e nao bool: vector<bool> nao e seguro aqui
+    int contaBlocos = 0;
 
     double actualRate = 0.0;
     juce::String lastError;
     std::atomic<bool> lost { false };
+    std::atomic<int> blocosRecebidos { 0 };
+    std::atomic<long long> amostrasRecebidas { 0 };
+    double ultimaMedidaMs = 0.0, ultimaTaxa = 0.0;
+    long long ultimoTotal = 0;
+    int blocoDisp = 0;
     std::atomic<int>  drops { 0 };
     double lostAtMs = 0.0;
 
@@ -319,6 +452,26 @@ public:
     }
 
     void closeAll() { devices.clear(); }
+
+    /** Fecha as placas que sairam do catalogo.
+
+        So havia closeAll, chamado ao ENCERRAR a mesa. Enquanto ela rodava, uma
+        placa tirada de uso continuava aberta: seguia consumindo CPU, seguia
+        tentando entregar audio que ninguem lia e seguia acumulando erro no
+        batimento — milhoes de buracos de um dispositivo que o operador achava
+        que tinha desligado.
+
+        Recebe os nomes que ainda tem dono; o resto e fechado. */
+    void fechaAsQueSairam (const std::vector<juce::String>& emUso)
+    {
+        for (auto it = devices.begin(); it != devices.end(); )
+        {
+            const auto nome = (*it)->deviceName();
+            const bool usada = std::find (emUso.begin(), emUso.end(), nome) != emUso.end();
+            if (usada) { ++it; continue; }
+            it = devices.erase (it);        // o destrutor para e fecha
+        }
+    }
 
     /** Nomes das placas atualmente perdidas — o alerta da barra de status. */
     std::vector<juce::String> lostDevices() const

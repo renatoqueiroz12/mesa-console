@@ -10,6 +10,9 @@
 #include "NetworkHub.h"
 #include "CommandReceiver.h"
 #include "GpioClient.h"
+#include "SpeechWriter.h"
+#include "Recorder.h"
+#include "SpeechStreamer.h"
 #include "../Core/RemoteCommand.h"
 #include <map>
 #if JUCE_WINDOWS
@@ -128,9 +131,15 @@ public:
         }
 
         iniciaGpio();
+        iniciaFala();
+
+        // o gravador recebe direto do callback; a fila e dele
+        engine.aoGravar = [this] (const float* x, int n) { gravador.alimenta (x, n); };
 
         secondaries.setLatencyMode (settings.secondaryLatencyMode);
         hub = std::make_unique<NetworkHub> (engine, secondaries);
+        hub->setPlacaLivewire (juce::String (settings.livewirePlaca));
+        hub->aoRegistrar = [this] (const juce::String& m) { pendingLog.add (m); };
         rebindNetwork();
 
         masterPanel = std::make_unique<MasterPanel> (engine.mixer, engine.automation);
@@ -164,6 +173,31 @@ public:
         };
         addAndMakeVisible (*janelaTela);
 
+        // ---- transporte de gravacao
+        //
+        // Simbolos e nao palavras: circulo, duas barras e quadrado sao lidos
+        // sem traducao, e a coluna e estreita demais para texto.
+        recRec = std::make_unique<SurfaceButton> (juce::String::fromUTF8 ("\xe2\x97\x8f"),
+                                                  theme::onRed, 17.0f);
+        recRec->onClick = [this] { alternaGravacao (canalParaGravar()); };
+        addAndMakeVisible (*recRec);
+
+        recPause = std::make_unique<SurfaceButton> (juce::String::fromUTF8 ("\xe2\x9d\x9a"),
+                                                    theme::prev, 15.0f);
+        recPause->onClick = [this]
+        {
+            if (! gravador.estaGravando()) return;
+            gravador.pausa (! gravador.estaPausado());
+            recPause->setActive (gravador.estaPausado());
+            log (gravador.estaPausado() ? "gravacao pausada" : "gravacao retomada");
+        };
+        addAndMakeVisible (*recPause);
+
+        recStop = std::make_unique<SurfaceButton> (juce::String::fromUTF8 ("\xe2\x96\xa0"),
+                                                   juce::Colour (0xff8a9099), 15.0f);
+        recStop->onClick = [this] { if (gravador.estaGravando()) alternaGravacao (-1); };
+        addAndMakeVisible (*recStop);
+
         janelaSair = std::make_unique<SurfaceButton> ("X", theme::onRed, 15.0f);
         janelaSair->onClick = [this]
         {
@@ -193,6 +227,26 @@ public:
         testMode.setToggleState (true, juce::dontSendNotification);
         testMode.onClick = [this] { engine.mixer.automation.testMode.store (testMode.getToggleState()); };
         addAndMakeVisible (testMode);
+
+        // Painel da transcricao, no lugar do log.
+        //
+        // O log tecnico foi para as configuracoes: ele serve para investigar
+        // defeito, e defeito se investiga sentado. O que interessa a quem esta
+        // operando e o que esta sendo DITO no ar — e isso merece a tela.
+        painelFala.setMultiLine (true);
+        painelFala.setReadOnly (true);
+        painelFala.setFont (theme::mono (12.0f));
+        painelFala.setColour (juce::TextEditor::backgroundColourId, theme::oledBg);
+        painelFala.setColour (juce::TextEditor::textColourId, theme::oled);
+        painelFala.setColour (juce::TextEditor::outlineColourId, juce::Colours::black);
+        addAndMakeVisible (painelFala);
+
+        // Estado bem a vista: transcricao que caiu em silencio e pior que
+        // transcricao desligada — o operador confia num texto que parou de
+        // chegar sem ninguem avisar.
+        estadoFala.setFont (theme::mono (11.0f, true));
+        estadoFala.setJustificationType (juce::Justification::centredLeft);
+        addAndMakeVisible (estadoFala);
 
         netLog.setMultiLine (true);
         netLog.setReadOnly (true);
@@ -255,6 +309,10 @@ public:
         stopTimer();
         receiver.stop();
         gpio.stop();
+        escritorFala.stop();
+        if (transcritor.isRunning()) transcritor.kill();
+        fluxoFala.stop();
+        gravador.stop();
         if (hub != nullptr) hub->shutdown();
         secondaries.closeAll();
         NdiEngine::instance().shutdown();
@@ -330,9 +388,32 @@ public:
 
         testMode.setBounds (rodape.removeFromTop (22));
         rodape.removeFromTop (4);
-        netLog.setBounds (rodape);
+        // com transcricao ligada, a tela mostra a fala; senao, o log
+        const bool mostraFala = settings.falaTempoReal;
+        painelFala.setVisible (mostraFala);
+        netLog.setVisible (! mostraFala);
+        if (mostraFala)
+        {
+            estadoFala.setVisible (true);
+            estadoFala.setBounds (rodape.removeFromTop (18));
+            rodape.removeFromTop (2);
+        }
+        else estadoFala.setVisible (false);
+
+        (mostraFala ? painelFala : netLog).setBounds (rodape);
 
         auto layerCol = inner.removeFromLeft (64);
+
+        // transporte de gravacao no pe da coluna esquerda
+        auto transporte = layerCol.removeFromBottom (40);
+        const int lb = (transporte.getWidth() - 4) / 3;
+        recRec  ->setBounds (transporte.removeFromLeft (lb));
+        transporte.removeFromLeft (2);
+        recPause->setBounds (transporte.removeFromLeft (lb));
+        transporte.removeFromLeft (2);
+        recStop ->setBounds (transporte);
+        layerCol.removeFromBottom (6);
+
         layerA->setBounds (layerCol.removeFromTop (layerCol.getHeight() / 2).withTrimmedBottom (3));
         layerB->setBounds (layerCol.withTrimmedTop (3));
         inner.removeFromLeft (6);
@@ -355,6 +436,7 @@ private:
             auto* s = new ChannelStrip (engine.mixer.channel (g), g,
                                         [this] (int idx) { softPressed (idx); });
             s->onPressOnOff = [this] (int idx, bool on) { pressOnOff (idx, on); };
+            s->onRec = [this] (int idx) { alternaGravacao (idx); };
             strips.add (s);
             addAndMakeVisible (s);
         }
@@ -385,6 +467,8 @@ private:
         if (idx < 0 || idx >= engine.mixer.numChannels()) return;
 
         auto* menu = new ChannelMenu (engine.mixer, engine.automation, settings, idx);
+        menu->aoGravar = [this] (int canal) { alternaGravacao (canal); };
+        menu->aoConsultarGravacao = [this] { return gravador.estaGravando(); };
         juce::DialogWindow::LaunchOptions o;
         o.content.setOwned (menu);
         o.dialogTitle = "Canal " + juce::String (idx + 1);
@@ -433,6 +517,19 @@ private:
         o.content.setOwned (cfg);
         o.dialogTitle = "Configuracoes";
         configOpen = true;
+        cfg->onLivewirePlaca = [this] (const juce::String& ip)
+        {
+            hub->setPlacaLivewire (ip);
+            log ("placa do Livewire: " + ip + " (deduzida da varredura)");
+            // religa agora: os receptores abertos estao presos a placa antiga
+            hub->fechaLivewire();
+            rebindNetwork();
+        };
+        // avisa tambem ao arrancar: quem herda uma configuracao pronta nunca
+        // abre a aba onde o aviso aparece
+        if (const auto c = mesa::conflitosDeSaida (settings); ! c.empty())
+            pendingLog.add ("ATENCAO conflito de saida: " + juce::String (c));
+
         cfg->onClosed = [this]
         {
             configOpen = false;
@@ -464,6 +561,28 @@ private:
         // globais primeiro: nao dependem de canal
         switch (c.action)
         {
+            case mesa::RemoteCommand::Action::Texto:
+            {
+                // LIMITE DURO no tamanho.
+                //
+                // O transcritor chegou a mandar o paragrafo inteiro do programa
+                // a cada duas frases, crescendo sem parar. Gravar e desenhar
+                // isso segurou a mesa a ponto de o AUDIO travar — e mesa que
+                // para o som nao vai ao ar. Nenhuma frase falada legitima passa
+                // de 400 caracteres; o que passa disso e defeito de quem
+                // enviou, e a mesa nao pode afundar por causa dele.
+                juce::String texto (c.name);
+                if (texto.length() > 400)
+                {
+                    texto = texto.substring (texto.length() - 400);
+                    ++falasCortadas;
+                }
+
+                log ("FALA: " + texto);
+                gravaTranscricao (texto);
+                mostraFala (texto);
+                return;
+            }
             case mesa::RemoteCommand::Action::AutomationOff:
                 engine.automation.suspended.store (true);
                 log ("<- " + in.from + "  AUTOMACAO SUSPENSA (VT no ar)");
@@ -580,7 +699,35 @@ private:
           << "  |  disp " << engine.deviceName
           << "  |  buf " << juce::String (engine.blockSize.load())
           << "  |  log " << juce::String (netLog.getTotalNumChars()) << " chars"
+          // Para localizar a perda: comparando o barramento com o que sai da
+          // placa, o degrau aparece sozinho. Sem os dois numeros lado a lado,
+          // "esta baixo" nao diz se a perda esta no canal, no barramento, no
+          // master ou depois.
+          << "  |  PGM1 bus "
+          << juce::String (engine.mixer.masterMeterL.peakDb(), 1) << " dBFS"
+          << "  master " << juce::String (settings.routing.masterGainDb, 1) << " dB"
+          << "  |  saidas";
+        {
+            const int n = juce::jmin (engine.canaisSaida.load(), 8);
+            for (int ch = 0; ch < n; ++ch)
+                l << " " << juce::String (ch + 1) << ":"
+                  << juce::String (20.0f * std::log10 (juce::jmax (1.0e-6f,
+                          engine.picoCanal[size_t (ch)].load())), 0);
+        }
+        l
           << "  |  cmds " << juce::String (receiver.received())
+          << (settings.falaTempoReal
+                  ? "  |  fala " + juce::String (fluxoFala.conectado() ? "ON" : "OFF")
+                    + " " + juce::String (linhasTranscritas) + " linhas "
+                    + juce::String (double (fluxoFala.amostrasEnviadas()) / 16000.0, 0) + "s"
+                    + (fluxoFala.descartes() > 0
+                           ? "  DESCARTES " + juce::String (fluxoFala.descartes())
+                           : juce::String())
+                    + (falasCortadas > 0
+                           ? "  CORTADAS " + juce::String (falasCortadas)
+                           : juce::String())
+                  : juce::String())
+          << (hub != nullptr ? hub->estadoLivewire() + hub->estadoNdi() : juce::String())
           << "  |  secundarias " << juce::String (secondaries.count());
 
         // Dois faders carregando o MESMO input entregam o mesmo sinal duas
@@ -618,7 +765,16 @@ private:
 
         for (int i = 0; i < secondaries.count(); ++i)
             if (auto* d = secondaries.at (i))
-                l << "  |  " << d->deviceName() << " falhas " << juce::String (d->glitches())
+                l << "  |  " << d->deviceName()
+                  << " " << juce::String (int (d->sampleRate())) << "Hz/"
+                  << juce::String (int (d->amostrasPorSegundo())) << "real"
+                  << " bloco " << juce::String (d->blocoDoDispositivo())
+                  << " ch " << juce::String (d->canaisAtivos())
+                  << (d->recebendo() ? (" recebendo " + juce::String (d->blocos()) + " blocos")
+                                     : juce::String (" SEM AUDIO (abriu mas nao entrega)"))
+                  << " buracos " << juce::String (d->buracos())
+                  << " faltas " << juce::String (d->faltas())
+                  << " descartes " << juce::String (d->descartes())
                   << " quedas " << juce::String (d->dropouts())
                   << (d->isLost() ? " PERDIDA" : "");
 
@@ -678,6 +834,68 @@ private:
 
     /** Log em arquivo. O log de tela some quando o processo morre, e queda de
         madrugada sem rastro e impossivel de investigar. */
+    /** Arquivo proprio para a transcricao, um por dia.
+
+        Separado do mesa.log de proposito: o log da mesa serve para investigar
+        defeito e e cortado quando cresce; a transcricao e material de estudo —
+        e dela que sai a resposta sobre com que frequencia um VT seria acionado
+        por voz e quais expressoes o locutor usa de verdade. Misturar as duas
+        coisas perde as duas. */
+    /** Acrescenta a fala ao painel da tela, com hora. */
+    void mostraFala (const juce::String& texto)
+    {
+        const auto agora = juce::Time::getCurrentTime();
+        // Acrescenta no fim, sem reescrever o texto inteiro: reconstruir a
+        // caixa a cada frase fica caro conforme ela cresce, e isso roda na
+        // mesma thread que desenha a mesa.
+        painelFala.moveCaretToEnd();
+        painelFala.insertTextAtCaret (agora.formatted ("%H:%M:%S") + "  " + texto + "\n");
+
+        // Aparar so de vez em quando: ler o texto inteiro para medir o
+        // tamanho custa caro quando a frase chega dez vezes por segundo.
+        if (++desdeUltimaApara >= 50)
+        {
+            desdeUltimaApara = 0;
+            const auto t = painelFala.getText();
+            if (t.length() > 12000)
+            {
+                painelFala.setText (t.substring (t.length() - 8000), false);
+                painelFala.moveCaretToEnd();
+            }
+        }
+    }
+
+    void gravaTranscricao (const juce::String& texto)
+    {
+        if (texto.trim().isEmpty()) return;
+
+        const auto agora = juce::Time::getCurrentTime();
+        const auto dia = agora.formatted ("%Y-%m-%d");
+
+        // Arquivo ABERTO, nao reaberto a cada frase.
+        //
+        // Com o texto chegando de dez em dez palavras, abrir e fechar o
+        // arquivo a cada linha vira dezenas de acessos a disco por segundo —
+        // na mesma thread que desenha a mesa. Foi o que a travou.
+        if (arquivoFala == nullptr || diaDaFala != dia)
+        {
+            auto pasta = settingsFile.getParentDirectory().getChildFile ("transcricoes");
+            pasta.createDirectory();
+            arquivoFala = std::make_unique<juce::FileOutputStream> (
+                              pasta.getChildFile (dia + ".txt"));
+            // o fluxo ja abre no fim do arquivo; nao ha o que posicionar
+            diaDaFala = dia;
+        }
+
+        if (arquivoFala != nullptr)
+        {
+            arquivoFala->writeText (agora.formatted ("%H:%M:%S") + "  " + texto + "\n",
+                                    false, false, "\n");
+            if (++desdeUltimoFlush >= 20) { arquivoFala->flush(); desdeUltimoFlush = 0; }
+        }
+        ++linhasTranscritas;
+    }
+
     void logToFile (const juce::String& line)
     {
         if (logFile.getFullPathName().isEmpty()) return;
@@ -728,6 +946,36 @@ private:
         }
         netLog.moveCaretToEnd();
         netLog.insertTextAtCaret (line + "\n");
+    }
+
+    void iniciaFala()
+    {
+        if (! settings.falaEnabled) return;
+        const auto pasta = settings.falaPasta.empty()
+                             ? settingsFile.getParentDirectory().getChildFile ("fala")
+                             : juce::File (settings.falaPasta);
+        escritorFala.start (pasta, engine.sampleRate.load());
+        pendingLog.add ("transcricao: trechos em " + pasta.getFullPathName());
+    }
+
+    /** Recolhe trechos prontos dos canais e manda gravar. */
+    void recolheFala()
+    {
+        if (! settings.falaEnabled) return;
+
+        for (int i = 0; i < engine.mixer.numChannels(); ++i)
+        {
+            auto& ch = engine.mixer.channel (i);
+            if (! ch.temFalaPronta()) continue;
+
+            const auto& t = ch.trechoDeFala();
+            escritorFala.enfileira (t);
+            log ("fala CH" + juce::String (i + 1) + ": trecho de "
+                 + juce::String (1000.0 * t.size() / engine.sampleRate.load() / 1000.0, 1)
+                 + " s gravado");
+            ch.limpaTrechoDeFala();
+            ch.marcaFalaRecolhida();
+        }
     }
 
     void iniciaGpio()
@@ -796,8 +1044,159 @@ private:
         }
     }
 
+    /** Leva de volta ao fader o que mudou no catalogo e NAO e ajuste do
+        operador.
+
+        Marcar "transcrever" no input e nao ver efeito nenhum ate recarregar o
+        fader na mao e o tipo de detalhe que faz o operador achar que a funcao
+        esta quebrada. Cuidado ao ampliar isto: fader, ON/OFF, bus e CUE sao do
+        operador e NAO podem ser sobrescritos pelo catalogo. */
+    void sincronizaDoCatalogo()
+    {
+        for (int i = 0; i < engine.mixer.numChannels(); ++i)
+        {
+            auto& ch = engine.mixer.channel (i);
+            if (const auto* def = settings.catalog.find (ch.name))
+            {
+                ch.params.fala.enabled    .store (def->transcrever);
+                ch.params.fala.thresholdDb.store (def->falaThresholdDb);
+                ch.params.fala.maxTrechoMs.store (def->falaMaxTrechoMs);
+
+                // Input existe, mas ninguem escolheu de onde vem o audio.
+                const bool nada = def->index < 0
+                               && def->streamName.empty()
+                               && def->deviceName.empty()
+                               && def->livewireChannel == 0;
+                ch.params.semFonte.store (nada);
+
+                // REAPONTA O CANAL para a posicao atual da fonte.
+                //
+                // O canal guarda um numero de POSICAO na lista de fontes de
+                // rede, e essa lista e remontada a cada rearranjo. Ao tirar uma
+                // fonte, as seguintes andam uma casa para tras — e o canal, que
+                // guardou o numero antigo, passa a tocar a fonte do vizinho.
+                // Foi assim que o Livewire de outra maquina apareceu no canal
+                // de um Livewire desligado.
+                ch.params.inputKind .store (def->kind);
+                ch.params.inputIndex.store (nada ? -1 : def->index);
+            }
+            else
+                ch.params.semFonte.store (! ch.name.empty());
+        }
+    }
+
+    /** Escolhe o canal da transcricao continua e liga o fluxo.
+
+        Precisa rodar DEPOIS de o catalogo ser aplicado aos canais: no arranque
+        a marca "transcrever" ainda nao chegou aos faders, e procurar por ela
+        antes disso nao encontra nada — era por isso que o fluxo nunca subia. */
+    /** Sobe o transcritor como processo FILHO.
+
+        Do ponto de vista de quem opera, a transcricao vive dentro da mesa:
+        abre e funciona. Por dentro continua sendo outro processo, e isso nao e
+        detalhe — WebSocket com TLS dentro do processo de audio e o tipo de
+        coisa que ja derrubou esta mesa duas vezes com o NDI. Aqui, se a API
+        falhar ou o transcritor travar, o ar nao sente. */
+    void iniciaTranscritor()
+    {
+        if (! settings.falaTempoReal) return;
+        if (transcritor.isRunning()) return;
+
+        auto script = settings.falaScript.empty()
+            ? juce::File::getSpecialLocation (juce::File::currentExecutableFile)
+                  .getParentDirectory().getChildFile ("transcritor_tempo_real.py")
+            : juce::File (settings.falaScript);
+
+        if (! script.existsAsFile())
+        {
+            log ("transcritor nao encontrado em " + script.getFullPathName());
+            return;
+        }
+
+        juce::StringArray cmd;
+        cmd.add (settings.falaPython.empty() ? "python" : settings.falaPython);
+        cmd.add (script.getFullPathName());
+        cmd.add ("--chave-da-mesa");
+        cmd.add ("--porta-audio");
+        cmd.add (juce::String (settings.falaPortaAudio));
+
+        // SEM pedir a saida do processo.
+        //
+        // Pedir e nao ler foi o que travou a mesa: o tubo enche, o transcritor
+        // trava ao imprimir, para de ler o audio, e a escrita da mesa no socket
+        // fica presa esperando ele consumir. Um bloqueio puxa o outro. A saida
+        // dele so servia para o terminal, que agora nem existe.
+        if (transcritor.start (cmd, 0))
+            log ("transcritor iniciado pela mesa");
+        else
+            log ("nao consegui iniciar o transcritor — confira Python no sistema");
+    }
+
+    void atualizaTranscricao()
+    {
+        if (! settings.falaTempoReal) return;
+        iniciaTranscritor();
+
+        for (int i = 0; i < engine.mixer.numChannels(); ++i)
+            if (engine.mixer.channel (i).params.fala.enabled.load())
+            {
+                if (engine.canalTranscricao.load() == i) return;   // ja e esse
+
+                engine.canalTranscricao.store (i);
+                engine.aoTranscrever = [this] (const float* x, int n)
+                { fluxoFala.alimenta (x, n); };
+                fluxoFala.start (settings.falaPortaAudio, engine.sampleRate.load());
+                log ("transcricao em tempo real: CH" + juce::String (i + 1)
+                     + " -> porta " + juce::String (settings.falaPortaAudio));
+                return;
+            }
+
+        // nenhum canal marcado: desliga em vez de mandar silencio para a nuvem
+        if (engine.canalTranscricao.load() >= 0)
+        {
+            engine.canalTranscricao.store (-1);
+            fluxoFala.stop();
+            log ("transcricao em tempo real: nenhum canal marcado, fluxo parado");
+        }
+    }
+
+    /** Leva o catalogo de outputs para o roteamento do motor.
+
+        O catalogo guardava a escolha certa e ninguem a aplicava: o
+        rebindOutputs so cuida de destinos de REDE, e quem manda o audio para a
+        placa e o roteamento por barramento. Resultado: escolher a saida
+        funcionava na hora — porque a tela tambem mexia no motor — e sumia ao
+        reabrir, quando so o roteamento antigo era aplicado. */
+    void aplicaSaidasDaPlaca()
+    {
+        for (const auto& o : settings.outputs.outputs)
+        {
+            if (o.kind == int (mesa::InputKind::Network)) continue;
+            if (o.pair < 0) continue;
+            if (o.busSource < 0 || o.busSource >= mesa::kNumBuses) continue;
+
+            settings.routing.busOutputPair[o.busSource] = o.pair;
+        }
+        mesa::applyRouting (settings, engine.mixer);
+    }
+
     void rebindNetwork()
     {
+        sincronizaDoCatalogo();
+        aplicaSaidasDaPlaca();
+
+        // Fecha as placas secundarias que sairam do catalogo. Sem isto, uma
+        // placa tirada de uso continuava aberta ate a mesa encerrar.
+        {
+            std::vector<juce::String> emUso;
+            for (const auto& s2 : settings.catalog.sources)
+                if (! s2.deviceName.empty()) emUso.push_back (juce::String (s2.deviceName));
+            for (const auto& o : settings.outputs.outputs)
+                if (! o.deviceName.empty()) emUso.push_back (juce::String (o.deviceName));
+            secondaries.fechaAsQueSairam (emUso);
+        }
+        atualizaTranscricao();
+        hub->setPlacaLivewire (juce::String (settings.livewirePlaca));
         // Descoberta so fica de pe se alguma fonte de fato usa NDI. Manter a
         // thread da biblioteca varrendo a rede sem necessidade ja derrubou a
         // mesa uma vez; nao ha motivo para pagar esse risco de graca.
@@ -831,12 +1230,55 @@ private:
             }
         }
 
+        // Diagnostico da transcricao: sem isto, "nao grava nada" nao tem
+        // investigacao — pode ser marca que nao chegou ao fader, nivel abaixo
+        // do limiar, ou canal sem sinal.
+        if (settings.falaEnabled && ++contaFala >= 250)   // ~10 s
+        {
+            contaFala = 0;
+            for (int i = 0; i < engine.mixer.numChannels(); ++i)
+            {
+                auto& ch = engine.mixer.channel (i);
+                if (! ch.params.fala.enabled.load()) continue;
+                const float nivel = ch.tapDb (mesa::TapPoint::Input);
+                const float limiar = ch.params.fala.thresholdDb.load();
+                logToFile ("fala CH" + juce::String (i + 1) + ": nivel "
+                           + juce::String (nivel, 1) + " / limiar "
+                           + juce::String (limiar, 1) + " dBFS"
+                           + (nivel > limiar ? "  ACIMA" : "  abaixo")
+                           + (ch.falandoAgora()
+                                  ? "  gravando ha " + juce::String (ch.duracaoFalaMs() / 1000.0, 1) + "s"
+                                  : juce::String ("  aguardando fala"))
+                           + "  gravados " + juce::String (escritorFala.gravados()));
+            }
+        }
+
         for (const auto& l : pendingLog) log (l);
         pendingLog.clear();
 
-        for (const auto& in : receiver.take()) applyRemote (in);
+        // Teto por passada: uma rajada de transcricao pode enfileirar dezenas
+        // de mensagens, e processar todas de uma vez segura a interface. O que
+        // passar do teto e guardado aqui e sai no proximo ciclo, 40 ms depois.
+        {
+            auto entrada = receiver.take();
+            for (auto& in : entrada) pendentesRemoto.push_back (in);
+
+            const int teto = 12;
+            for (int i = 0; i < teto && ! pendentesRemoto.empty(); ++i)
+            {
+                applyRemote (pendentesRemoto.front());
+                pendentesRemoto.erase (pendentesRemoto.begin());
+            }
+
+            // fila que so cresce e sinal de que nao damos conta: descarta o
+            // mais VELHO, que na transcricao ja nao interessa
+            if (pendentesRemoto.size() > 200)
+                pendentesRemoto.erase (pendentesRemoto.begin(),
+                                       pendentesRemoto.begin() + 100);
+        }
 
         logTriggerChanges();
+        recolheFala();
         aplicaEntradasGpio();
         atualizaSaidasGpio();
 
@@ -848,6 +1290,23 @@ private:
                                     + (probs.size() > 1
                                            ? "  (+" + juce::String (int (probs.size()) - 1) + ")"
                                            : "");
+
+        if (settings.falaTempoReal)
+        {
+            const bool ok = fluxoFala.conectado();
+            estadoFala.setText (ok ? "TRANSCRICAO ON" : "TRANSCRICAO OFF",
+                                juce::dontSendNotification);
+            estadoFala.setColour (juce::Label::textColourId,
+                                  ok ? theme::busGreen : theme::onRed);
+        }
+
+        if (gravador.estaGravando())
+        {
+            alertText = (gravador.estaPausado() ? "GRAVACAO PAUSADA  " : "GRAVANDO  ")
+                      + juce::String (gravador.segundos(), 0) + " s";
+            recRec->setActive (! gravador.estaPausado());
+        }
+        else recRec->setActive (false);
 
         statusText = juce::String ("v") + mesa::kVersion + "   |   "
                    + (openError.isEmpty() ? engine.deviceName : "ERRO: " + openError)
@@ -874,6 +1333,8 @@ private:
                 const int cam = engine.mixer.channel (g).params.trigger.camera.load();
                 strips[i]->setOnAir (cam > 0 && cam == engine.automation.camera());
             }
+            strips[i]->setGravando (gravador.estaGravando()
+                                    && engine.canalGravado.load() == layer * kFadersPerLayer + i);
             strips[i]->refresh();
         }
 
@@ -924,13 +1385,93 @@ private:
     std::unique_ptr<SurfaceButton> layerA, layerB;
     std::unique_ptr<MasterPanel> masterPanel;
     std::unique_ptr<SurfaceButton> janelaMin, janelaTela, janelaSair;
+    std::unique_ptr<SurfaceButton> recRec, recPause, recStop;
     juce::TextButton cfgButton, pageButton;
     juce::ToggleButton testMode;
-    juce::TextEditor netLog;
+    juce::TextEditor netLog, painelFala;
+    juce::Label estadoFala;
     juce::Rectangle<int> chassis, statusArea;
     SecondaryDevices secondaries;
     CommandReceiver receiver;
     GpioClient gpio;
+    SpeechWriter escritorFala;
+    SpeechStreamer fluxoFala;
+    int linhasTranscritas = 0;
+    juce::ChildProcess transcritor;
+    std::unique_ptr<juce::FileOutputStream> arquivoFala;
+    juce::String diaDaFala;
+    std::vector<CommandReceiver::Incoming> pendentesRemoto;
+    int desdeUltimoFlush = 0, desdeUltimaApara = 0;
+    int falasCortadas = 0;
+    Recorder gravador;
+
+public:
+    /** Liga e desliga a gravacao de diagnostico de um canal. */
+    juce::String alternaGravacao (int canal)
+    {
+        if (settings.falaTempoReal)
+        {
+            const bool ok = fluxoFala.conectado();
+            estadoFala.setText (ok ? "TRANSCRICAO ON" : "TRANSCRICAO OFF",
+                                juce::dontSendNotification);
+            estadoFala.setColour (juce::Label::textColourId,
+                                  ok ? theme::busGreen : theme::onRed);
+        }
+
+        if (gravador.estaGravando())
+        {
+            const auto f = gravador.arquivoAtual();
+            const double s = gravador.segundos();
+            const int perdidas = gravador.amostrasPerdidas();
+            engine.canalGravado.store (-1);
+            gravador.stop();
+            log ("gravacao encerrada: " + f.getFileName() + "  "
+                 + juce::String (s, 1) + " s"
+                 + (perdidas > 0 ? "  (perdeu " + juce::String (perdidas) + " amostras)" : ""));
+            return f.getFullPathName();
+        }
+
+        // no ponto "programa" nao ha canal: grava o PGM 1
+        if (settings.recPonto != 2 && (canal < 0 || canal >= engine.mixer.numChannels()))
+            return {};
+
+        const auto pasta = settings.recPasta.empty()
+                             ? settingsFile.getParentDirectory().getChildFile ("gravacoes")
+                             : juce::File (settings.recPasta);
+        const double taxa = settings.recTaxaDaPlaca ? engine.sampleRate.load() : 48000.0;
+        const auto etiqueta = settings.recPonto == 2 ? juce::String ("PGM1")
+                                                     : "CH" + juce::String (canal + 1);
+        const auto f = gravador.start (pasta, taxa, etiqueta, settings.recBits);
+        if (f == juce::File()) { log ("gravacao: nao consegui criar o arquivo"); return {}; }
+
+        engine.pontoGravacao.store (settings.recPonto);
+        engine.canalGravado.store (canal);
+        static const char* pontos[] = { "entrada crua", "pos-fader", "PGM 1" };
+        log (juce::String ("gravando ") + etiqueta + " ("
+             + pontos[juce::jlimit (0, 2, settings.recPonto)] + ", "
+             + juce::String (int (taxa)) + " Hz, " + juce::String (settings.recBits)
+             + " bits) em " + f.getFileName());
+        return f.getFullPathName();
+    }
+
+    bool estaGravando() const { return gravador.estaGravando(); }
+
+    /** Canal que o botao do transporte grava: o que estiver com CUE ligado,
+        senao o primeiro com fonte. Assim o transporte funciona sem obrigar o
+        operador a abrir o menu do canal. */
+    int canalParaGravar() const
+    {
+        for (int i = 0; i < engine.mixer.numChannels(); ++i)
+            if (engine.mixer.channel (i).params.cue.load()) return i;
+        for (int i = 0; i < engine.mixer.numChannels(); ++i)
+            if (! engine.mixer.channel (i).name.empty()) return i;
+        return 0;
+    }
+    double segundosGravados() const { return gravador.segundos(); }
+    juce::File pastaGravacoes() const
+    { return settingsFile.getParentDirectory().getChildFile ("gravacoes"); }
+
+private:
     std::mutex mutexGpio;
     std::vector<GpioClient::Evento> entradasGpio;
     std::vector<int> ultimoOn;
@@ -949,6 +1490,7 @@ private:
     bool configOpen = false;
     bool avisouFila = false;
     bool avisouDuplicado = false;
+    int contaFala = 0;
     std::vector<int> lastTrigState;
     /** Fader guardado por PAUSE, para o PLAY seguinte retomar no mesmo ponto. */
     std::map<int, float> pausedFader;

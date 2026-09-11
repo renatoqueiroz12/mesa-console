@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include "DspUtil.h"
 #include "RateConverter.h"
 #include <vector>
@@ -114,7 +115,52 @@ public:
     }
 
     /** thread da rede / do dispositivo secundario */
-    void push (const float* samples, int n) noexcept { ring.write (samples, n); }
+    void push (const float* samples, int n) noexcept
+    {
+        ring.write (samples, n);
+        empurradas.fetch_add (n, std::memory_order_relaxed);
+    }
+
+    /** Amostras que CHEGARAM por segundo, medidas de verdade.
+
+        A taxa que a fonte declara e a que ela entrega podem divergir, e quando
+        divergem o audio sai picotado sem que buraco ou falha acusem nada: a
+        fila entrega o que tem, so que em menos quantidade do que o tempo pede.
+        Foi assim com um dispositivo que declarava 48000 e entregava 14000. */
+    double amostrasPorSegundo() noexcept
+    {
+        // relogio padrao, e nao o do JUCE: o motor compila e e testado sem
+        // ele, e uma dependencia a toa aqui quebraria a suite
+        using Relogio = std::chrono::steady_clock;
+        const double agora = double (std::chrono::duration_cast<std::chrono::milliseconds> (
+                                         Relogio::now().time_since_epoch()).count());
+        const long long total = empurradas.load (std::memory_order_relaxed);
+
+        if (ultimaMedidaMs <= 0.0) { ultimaMedidaMs = agora; ultimoTotal = total; return 0.0; }
+
+        const double dt = (agora - ultimaMedidaMs) / 1000.0;
+        if (dt < 0.5) return ultimaTaxa;
+
+        ultimaTaxa = double (total - ultimoTotal) / dt;
+        ultimaMedidaMs = agora;
+        ultimoTotal = total;
+        return ultimaTaxa;
+    }
+
+    /** Alguem consumiu esta fila desde a ultima verificacao?
+
+        Um dispositivo estereo cria fila para os DOIS canais, mas normalmente
+        so um esta ligado a um fader. A fila orfa enchia e transbordava para
+        sempre — inofensivo para o audio, mas enchia o diagnostico de milhares
+        de descartes e escondia problema de verdade. Quem entrega usa isto para
+        nao alimentar fila que ninguem le. */
+    bool temConsumidor() noexcept
+    {
+        const int agora = pulls.load (std::memory_order_relaxed);
+        const bool houve = agora != ultimoPullVisto;
+        ultimoPullVisto = agora;
+        return houve;
+    }
 
     /** thread de audio: devolve sempre um bloco valido de n amostras.
 
@@ -125,6 +171,7 @@ public:
         tempo rodando. */
     const float* pull (int n) noexcept
     {
+        pulls.fetch_add (1, std::memory_order_relaxed);
         // Trava de seguranca: pedir mais do que o buffer comporta escreveria
         // fora dele e corromperia memoria. Aconteceu de verdade — o
         // transmissor Livewire puxa 240 amostras por pacote e a fila fora
@@ -148,13 +195,18 @@ public:
         // razao total = diferenca conhecida de taxa x correcao fina de deriva
         const double ratio = nominal * driftCtl.update (double (ring.fillRatio()), blocksPerSec);
 
-        // pullOne le uma amostra da fila; se faltar, devolve silencio e conta
-        resampler.process (scratch.data(), n, ratio, [this]() noexcept
+        // pullOne le uma amostra da fila. Contamos as que faltaram DE FATO:
+        // a verificacao anterior olhava so o inicio do bloco, e a fila
+        // esvaziava no meio — o contador dizia zero enquanto o audio saia
+        // cheio de buracos de poucos milissegundos.
+        int faltando = 0;
+        resampler.process (scratch.data(), n, ratio, [this, &faltando]() noexcept
         {
             float v = 0.0f;
-            ring.read (&v, 1);
+            if (! ring.read (&v, 1)) ++faltando;
             return v;
         });
+        if (faltando > 0) amostrasFaltando.fetch_add (faltando, std::memory_order_relaxed);
         return scratch.data();
     }
 
@@ -197,6 +249,12 @@ public:
     /** Quantas vezes alguem pediu mais do que a fila comporta. Diferente de
         zero significa fila dimensionada errado por quem a criou. */
     int  badPulls() const noexcept { return overflowPulls.load (std::memory_order_relaxed); }
+    /** Blocos em que a fila nao tinha material suficiente. Este e o numero que
+        importa: um por bloco, na escala do que o ouvido percebe. */
+    int  faltas() const noexcept { return faltasNoBloco.load (std::memory_order_relaxed); }
+    /** Amostras que a fila nao tinha na hora de entregar. Vira buraco no audio:
+        e o numero que corresponde ao que se ouve. */
+    int  amostrasEmFalta() const noexcept { return amostrasFaltando.load (std::memory_order_relaxed); }
     bool isConnected() const noexcept { return connected.load (std::memory_order_relaxed); }
 
     std::string name;
@@ -215,6 +273,13 @@ private:
     bool correctDrift = true;
     std::atomic<bool> lost { false };
     std::atomic<int> overflowPulls { 0 };
+    std::atomic<int> faltasNoBloco { 0 };
+    std::atomic<int> pulls { 0 };
+    std::atomic<int> amostrasFaltando { 0 };
+    std::atomic<long long> empurradas { 0 };
+    double ultimaMedidaMs = 0.0, ultimaTaxa = 0.0;
+    long long ultimoTotal = 0;
+    int ultimoPullVisto = 0;
     std::atomic<bool> connected { false };
 };
 

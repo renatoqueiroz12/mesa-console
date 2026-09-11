@@ -27,7 +27,18 @@ struct DeviceSettings
 
 struct RoutingSettings
 {
-    int busOutputPair[kNumBuses] = { 0, 1, 2, 3 };   // -1 = nao roteado
+    /** Onde cada barramento sai. -1 = nao roteado.
+
+        Os quatro vem roteados, como sempre foi. Cheguei a deixar so o PGM 1
+        para evitar colisao com os monitores, e isso parou o audio de uma
+        instalacao que funcionava. Padrao de fabrica nao e lugar de corrigir
+        configuracao existente: quem avisa da colisao e o detector abaixo, que
+        mostra o problema sem tirar nada do ar. */
+    int busOutputPair[kNumBuses] = { 0, 1, 2, 3 };
+    /** Ajuste fino do nivel de cada barramento na saida. Zero e o correto: o
+        caminho ja entrega unidade. Existe para casar com equipamento externo
+        que espere outro nivel de referencia, nao para corrigir a mesa. */
+    float busGainDb[kNumBuses] = { 0.0f, 0.0f, 0.0f, 0.0f };
     int cueOutputPair     = -1;
     int monitorOutputPair = -1;   // monitor do controle
     int phonesOutputPair  = -1;   // fone do operador
@@ -35,6 +46,18 @@ struct RoutingSettings
     int ext1InputPair     = -1;   // fontes externas do seletor de monitor
     int ext2InputPair     = -1;
     float masterGainDb = 0.0f;
+
+    /** CUE: onde entra e quanto abaixa o que ja tocava.
+
+        Ficavam so no motor e sumiam ao reabrir a mesa — ajuste de estudio que
+        o operador refazia toda manha. */
+    bool  cueToPhones  = true;
+    bool  cueToMonitor = false;
+    bool  cueToStudio  = false;
+    /** -12 de fabrica: abaixa o programa o suficiente para o CUE se destacar e
+        ainda deixa o ar audivel por baixo. Antes o padrao era -120, que
+        substitui — e quem so queria conferir um corte perdia o ar de vista. */
+    float cueDimDb     = -12.0f;
 };
 
 /** Como a superficie e desenhada. Pertence a instalacao, nao a cena. */
@@ -221,9 +244,36 @@ struct Settings
         Diferente da 8099, que e por onde os comandos saem. */
     int vmixApiPort = 8088;
 
+    /** Gravacao de programa. */
+    std::string recPasta;            // vazio = subpasta "gravacoes" da config
+    int  recBits = 24;               // 16, 24 ou 32 (float)
+    bool recTaxaDaPlaca = true;      // false = grava em 48000 fixo
+    /** 0 = entrada crua do canal, 1 = pos-fader, 2 = PGM 1. */
+    int  recPonto = 0;
+
+    /** Transcricao em tempo real: manda audio continuo pela porta abaixo,
+        em vez de gravar arquivo e esperar o trecho fechar. */
+    bool falaTempoReal = false;
+    /** Chave da API de transcricao. Guardada aqui para o operador nao precisar
+        passar na linha de comando toda vez. */
+    std::string falaChave;
+    /** Caminho do transcritor. Vazio procura ao lado do executavel. */
+    std::string falaScript;
+    /** Interpretador. Vazio usa "python" do PATH. */
+    std::string falaPython;
+    int  falaPortaAudio = 8891;
+
+    /** Transcricao: grava trechos de fala em WAV para um transcritor externo. */
+    bool falaEnabled = false;
+    std::string falaPasta;          // vazio = subpasta "fala" ao lado da config
+
     /** GPIO pelo LWRP: usa o mesmo no do Livewire quando vazio. */
     bool gpioEnabled = false;
     std::string gpioNode;
+
+    /** Placa de rede do Livewire, por IP. Vazio deixa o Windows escolher — o
+        que numa maquina com mais de uma placa costuma dar errado. */
+    std::string livewirePlaca;
 
     /** No Axia/Livewire consultado para listar fontes (LWRP, porta 93). */
     std::string livewireNode;
@@ -256,11 +306,52 @@ struct Settings
     DspSettings     dsp;
 };
 
+/** Pares de saida com mais de um dono.
+
+    Dois caminhos escrevendo no mesmo par nao somam: um sobrescreve o outro, e
+    o que sai depende da ordem em que o codigo roda. O sintoma e cruel — o som
+    aparece, mais baixo ou diferente, e nada acusa erro. Custou uma tarde de
+    investigacao ate medirmos canal a canal.
+
+    Devolve texto vazio quando esta tudo certo. */
+inline std::string conflitosDeSaida (const Settings& s)
+{
+    struct Dono { int par; const char* nome; };
+    std::vector<Dono> donos;
+
+    for (int b = 0; b < kNumBuses; ++b)
+        if (s.routing.busOutputPair[b] >= 0)
+            donos.push_back ({ s.routing.busOutputPair[b],
+                               b == 0 ? "PGM 1" : b == 1 ? "PGM 2"
+                                                : b == 2 ? "PGM 3" : "PGM 4" });
+
+    if (s.routing.monitorOutputPair >= 0) donos.push_back ({ s.routing.monitorOutputPair, "monitor" });
+    if (s.routing.phonesOutputPair  >= 0) donos.push_back ({ s.routing.phonesOutputPair,  "fone" });
+    if (s.routing.studioOutputPair  >= 0) donos.push_back ({ s.routing.studioOutputPair,  "estudio" });
+    if (s.routing.cueOutputPair     >= 0) donos.push_back ({ s.routing.cueOutputPair,     "CUE" });
+
+    std::string aviso;
+    for (size_t i = 0; i < donos.size(); ++i)
+        for (size_t j = i + 1; j < donos.size(); ++j)
+            if (donos[i].par == donos[j].par)
+            {
+                if (! aviso.empty()) aviso += "; ";
+                aviso += std::string (donos[i].nome) + " e " + donos[j].nome
+                       + " no mesmo par (saidas "
+                       + std::to_string (donos[i].par * 2 + 1) + "/"
+                       + std::to_string (donos[i].par * 2 + 2) + ")";
+            }
+    return aviso;
+}
+
 /** Aplica ao engine o que e aplicavel em tempo real (roteamento e master). */
 inline void applyRouting (const Settings& s, MixerEngine& mix)
 {
     for (int b = 0; b < kNumBuses; ++b)
+    {
         mix.busParams[b].outputPair.store (s.routing.busOutputPair[b]);
+        mix.busParams[b].gainDb.store (s.routing.busGainDb[b]);
+    }
     mix.monitor.cuePair    .store (s.routing.cueOutputPair);
     mix.monitor.monitorPair.store (s.routing.monitorOutputPair);
     mix.monitor.phonesPair .store (s.routing.phonesOutputPair);
@@ -268,6 +359,10 @@ inline void applyRouting (const Settings& s, MixerEngine& mix)
     mix.monitor.ext1Pair   .store (s.routing.ext1InputPair);
     mix.monitor.ext2Pair   .store (s.routing.ext2InputPair);
     mix.masterGainDb.store (s.routing.masterGainDb);
+    mix.monitor.cueToPhones .store (s.routing.cueToPhones);
+    mix.monitor.cueToMonitor.store (s.routing.cueToMonitor);
+    mix.monitor.cueToStudio .store (s.routing.cueToStudio);
+    mix.monitor.cueDimDb    .store (s.routing.cueDimDb);
 }
 
 inline std::string settingsToJson (const Settings& s)
@@ -290,6 +385,9 @@ inline std::string settingsToJson (const Settings& s)
     auto pairs = array();
     for (int b = 0; b < kNumBuses; ++b) pairs.arr.push_back (num (s.routing.busOutputPair[b]));
     r.set ("busOutputPair", pairs);
+    Value ganhos; ganhos.type = Value::Array;
+    for (int b = 0; b < kNumBuses; ++b) ganhos.arr.push_back (num (s.routing.busGainDb[b]));
+    r.set ("busGainDb", ganhos);
     r.set ("cueOutputPair",     num (s.routing.cueOutputPair));
     r.set ("monitorOutputPair", num (s.routing.monitorOutputPair));
     r.set ("phonesOutputPair",  num (s.routing.phonesOutputPair));
@@ -297,6 +395,10 @@ inline std::string settingsToJson (const Settings& s)
     r.set ("ext1InputPair",     num (s.routing.ext1InputPair));
     r.set ("ext2InputPair",     num (s.routing.ext2InputPair));
     r.set ("masterGainDb",      num (s.routing.masterGainDb));
+    r.set ("cueToPhones",       boolean (s.routing.cueToPhones));
+    r.set ("cueToMonitor",      boolean (s.routing.cueToMonitor));
+    r.set ("cueToStudio",       boolean (s.routing.cueToStudio));
+    r.set ("cueDimDb",          num (s.routing.cueDimDb));
     root.set ("routing", r);
 
     auto sf = object();
@@ -398,8 +500,20 @@ inline std::string settingsToJson (const Settings& s)
     root.set ("tallyIdle",       text (hex (s.tallyIdle)));
     root.set ("deviceState",     text (s.deviceState));
     root.set ("vmixApiPort",     num (s.vmixApiPort));
+    root.set ("recPasta",        text (s.recPasta));
+    root.set ("recBits",         num (s.recBits));
+    root.set ("recTaxaDaPlaca",  boolean (s.recTaxaDaPlaca));
+    root.set ("recPonto",        num (s.recPonto));
+    root.set ("falaTempoReal",   boolean (s.falaTempoReal));
+    root.set ("falaChave",       text (s.falaChave));
+    root.set ("falaScript",      text (s.falaScript));
+    root.set ("falaPython",      text (s.falaPython));
+    root.set ("falaPortaAudio",  num (s.falaPortaAudio));
+    root.set ("falaEnabled",     boolean (s.falaEnabled));
+    root.set ("falaPasta",       text (s.falaPasta));
     root.set ("gpioEnabled",     boolean (s.gpioEnabled));
     root.set ("gpioNode",        text (s.gpioNode));
+    root.set ("livewirePlaca",   text (s.livewirePlaca));
     root.set ("livewireNode",    text (s.livewireNode));
     root.set ("remoteEnabled",   boolean (s.remoteEnabled));
     root.set ("remoteUdpPort",   num (s.remoteUdpPort));
@@ -437,6 +551,10 @@ inline bool settingsFromJson (const std::string& src, Settings& out)
     }
     if (auto* r = root.find ("routing"))
     {
+        if (auto* g = r->find ("busGainDb"))
+            for (int b = 0; b < kNumBuses && b < int (g->arr.size()); ++b)
+                out.routing.busGainDb[b] = float (g->arr[size_t (b)].num);
+
         if (auto* pairs = r->find ("busOutputPair"))
             for (int b = 0; b < kNumBuses && size_t (b) < pairs->arr.size(); ++b)
                 out.routing.busOutputPair[b] = int (pairs->arr[size_t (b)].num);
@@ -447,6 +565,10 @@ inline bool settingsFromJson (const std::string& src, Settings& out)
         out.routing.ext1InputPair     = int (r->number ("ext1InputPair", -1));
         out.routing.ext2InputPair     = int (r->number ("ext2InputPair", -1));
         out.routing.masterGainDb      = float (r->number ("masterGainDb", 0.0));
+        out.routing.cueToPhones       = r->boolean ("cueToPhones", true);
+        out.routing.cueToMonitor      = r->boolean ("cueToMonitor", false);
+        out.routing.cueToStudio       = r->boolean ("cueToStudio", false);
+        out.routing.cueDimDb          = float (r->number ("cueDimDb", -12.0));
     }
     if (auto* sf = root.find ("surface"))
     {
@@ -553,8 +675,20 @@ inline bool settingsFromJson (const std::string& src, Settings& out)
     out.tallyIdle  = hexOr ("tallyIdle",  0xff20242a);
     out.deviceState       = root.string ("deviceState");
     out.vmixApiPort       = int (root.number ("vmixApiPort", 8088));
+    out.recPasta          = root.string ("recPasta");
+    out.recBits           = int (root.number ("recBits", 24));
+    out.recTaxaDaPlaca    = root.boolean ("recTaxaDaPlaca", true);
+    out.recPonto          = int (root.number ("recPonto", 0));
+    out.falaTempoReal     = root.boolean ("falaTempoReal", false);
+    out.falaChave         = root.string ("falaChave");
+    out.falaScript        = root.string ("falaScript");
+    out.falaPython        = root.string ("falaPython");
+    out.falaPortaAudio    = int (root.number ("falaPortaAudio", 8891));
+    out.falaEnabled       = root.boolean ("falaEnabled", false);
+    out.falaPasta         = root.string ("falaPasta");
     out.gpioEnabled       = root.boolean ("gpioEnabled", false);
     out.gpioNode          = root.string ("gpioNode");
+    out.livewirePlaca     = root.string ("livewirePlaca");
     out.livewireNode      = root.string ("livewireNode");
     out.remoteEnabled     = root.boolean ("remoteEnabled", true);
     out.remoteUdpPort     = int (root.number ("remoteUdpPort", 8890));

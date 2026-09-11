@@ -182,7 +182,8 @@ public:
         : ch (c), index (globalIndex),
           soft ("SOFT ...", theme::oled),
           autoBtn ("AUTO", theme::wide, 10.0f),
-          preview ("PREV", theme::prev),
+          preview ("CUE", theme::prev),
+          recBtn ("REC", theme::onRed, 10.0f),
           bigOn ("ON", theme::onRed, 15.0f),
           bigOff ("OFF", theme::offLaranja, 15.0f)
     {
@@ -218,6 +219,9 @@ public:
         };
         addAndMakeVisible (preview);
 
+        recBtn.onClick = [this] { if (onRec) onRec (index); };
+        addAndMakeVisible (recBtn);
+
         fader.onDbChange = [this] (float db)
         {
             // Operador encostou no fader: assume o controle. Dois donos do
@@ -244,6 +248,9 @@ public:
 
     /** Ligada pela MainComponent: o envio de comando mora la, junto do engine. */
     std::function<void (int, bool)> onPressOnOff;
+    /** Aperto no REC daquele canal. */
+    std::function<void (int)> onRec;
+    void setGravando (bool v) { recBtn.setActive (v); }
 
     /** Chamada pelo timer da tela. Nao toca em nada do audio. */
     void refresh()
@@ -277,8 +284,19 @@ public:
         auto o = oledArea.reduced (7, 6);
         g.setColour (theme::oled);
         g.setFont (theme::mono (13.0f));
-        g.drawText (ch.name.empty() ? juce::String ("--") : juce::String (ch.name),
+        // Canal sem fonte se anuncia como INATIVO.
+        //
+        // "--" nao diz nada: parece nome em branco, e o operador tenta abrir o
+        // fader sem entender por que nao sai som. Dizer que esta inativo e a
+        // diferenca entre um defeito aparente e um estado conhecido.
+        // Inativo por duas razoes: fader vazio, ou input carregado sem fonte
+        // escolhida. O segundo caso enganava — mostrava o nome e nao saia som.
+        const bool semFonte = ch.name.empty() || ch.params.semFonte.load();
+
+        if (semFonte) g.setColour (theme::oledDim);
+        g.drawText (semFonte ? juce::String ("INATIVO") : juce::String (ch.name),
                     o.removeFromTop (16), juce::Justification::centredLeft, true);
+        if (semFonte) g.setColour (theme::oled);
 
         auto subRow = o.removeFromTop (13);
         g.setFont (theme::mono (10.0f));
@@ -388,10 +406,14 @@ public:
         bus[3]->setBounds (busBottom.removeFromRight (halfW));
         r.removeFromTop (6);
 
+        // tres botoes na mesma linha: CUE, AUTO e REC
         auto prevRow = r.removeFromTop (32);
-        autoBtn.setBounds (prevRow.removeFromRight (64));
-        prevRow.removeFromRight (4);
-        preview.setBounds (prevRow);
+        const int larg = (prevRow.getWidth() - 8) / 3;
+        preview.setBounds (prevRow.removeFromLeft (larg));
+        prevRow.removeFromLeft (4);
+        autoBtn.setBounds (prevRow.removeFromLeft (larg));
+        prevRow.removeFromLeft (4);
+        recBtn.setBounds (prevRow);
         r.removeFromTop (6);
 
 
@@ -512,7 +534,7 @@ private:
 
     mesa::Channel& ch;
     int index;
-    SurfaceButton soft, autoBtn, preview, bigOn, bigOff;
+    SurfaceButton soft, autoBtn, preview, recBtn, bigOn, bigOff;
     std::unique_ptr<SurfaceButton> bus[4];
     FaderComponent fader;
     juce::Rectangle<int> oledArea, meterInArea, meterOutArea, dbReadout, trigRow;

@@ -4,6 +4,7 @@
 #include "DspRack.h"
 #include "Diagnostics.h"
 #include "AutoMixer.h"
+#include "SpeechSegmenter.h"
 #include <vector>
 #include <atomic>
 #include <string>
@@ -135,6 +136,13 @@ struct ChannelParams
     std::atomic<float>    trimDb     { 0.0f };   // trim manual (-25..+25)
     std::atomic<float>    faderDb    { -100.0f };
     std::atomic<float>    panPos     { 0.0f };   // -1 esq .. +1 dir
+    /** Input carregado, mas sem fonte escolhida.
+
+        Diferente de canal vazio: aqui existe input, com nome e ajustes, e
+        ninguem apontou de onde vem o audio. A tira precisa dizer isso — antes
+        mostrava o nome normalmente e simplesmente nao saia som, o que parece
+        defeito da mesa. */
+    std::atomic<bool>     semFonte   { false };
     std::atomic<bool>     on         { false };
     std::atomic<bool>     mute       { false };
     std::atomic<bool>     cue        { false };
@@ -147,6 +155,7 @@ struct ChannelParams
     std::atomic<bool>  talkTo { false };       // operador falando com esta fonte
     AutoTrimParams        autoTrim;
     AutoMixParams         autoMix;
+    SpeechSegmenter::Params fala;
     TriggerParams         trigger;
 
     /** LOGICA DO CANAL (fader-start): comandos disparados na BORDA de ON/OFF.
@@ -167,12 +176,14 @@ public:
         const double sr = sampleRate_;
         scratch .assign (size_t (maxBlockSize), 0.0f);
         preFader.assign (size_t (maxBlockSize), 0.0f);
+        bruto.assign (size_t (maxBlockSize), 0.0f);
         meterIn .prepare (sr);
         meterDsp.prepare (sr);
         meterOut.prepare (sr);
         rack.prepare (sr, maxBlockSize);
         autoTrim.prepare (sr);
         autoMixer.prepare (sr, maxBlockSize);
+        segmentador.prepare (sr, maxBlockSize);
         trimGain .prepare (sr, 25.0f);
         faderGain.prepare (sr, 20.0f);
         presence.reset();
@@ -196,6 +207,13 @@ public:
 
         for (int i = 0; i < n; ++i) dst[i] = in[i];
 
+        // Copia crua da ENTRADA, antes de trim, DSP e fader.
+        //
+        // Serve ao gravador de diagnostico: para saber ONDE o audio se
+        // estraga, precisamos de um ponto de escuta que nao passou por
+        // nenhum processamento nosso.
+        for (int i = 0; i < n; ++i) bruto[size_t (i)] = in[i];
+
         // 1. medicao de entrada
         meterIn.process (dst, n);
         taps[int (TapPoint::Input)].store (meterIn.fastDb(), std::memory_order_relaxed);
@@ -215,6 +233,18 @@ public:
 
         // guarda o sinal pre-fader: e ele que alimenta o CUE (PFL) e o Audio Trigger
         for (int i = 0; i < n; ++i) preFader[size_t (i)] = dst[i];
+
+        // Transcricao: escuta a ENTRADA, nao o pos-fader. O texto do que foi
+        // dito nao deve depender de o operador ter aberto o canal ou de onde
+        // deixou o fader.
+        // TRAVA o aviso ate alguem recolher.
+        //
+        // Antes era atribuicao direta: ficava verdadeiro no bloco em que o
+        // trecho fechava e voltava a falso no bloco seguinte, 0,167 ms depois
+        // com buffer de 8. A interface olha 25 vezes por segundo — nunca
+        // pegava. O trecho era montado e descartado sem ninguem ver.
+        if (segmentador.process (params.fala, in, n))
+            falaPronta.store (true, std::memory_order_release);
 
         // 4. nivelador: mede o sinal PRE-fader e decide onde o fader deve estar.
         // Medir depois do fader fecharia uma malha que oscila.
@@ -256,6 +286,17 @@ public:
     /** Onde o nivelador colocou o fader. Igual ao fader quando esta desligado. */
     float autoMixFaderDb() const noexcept { return autoMixer.currentFaderDb(); }
 
+    /** Entrada crua do bloco atual, sem nada aplicado. */
+    const float* entradaBruta() const noexcept { return bruto.data(); }
+
+    /** Ha trecho de fala pronto para recolher. Zerado por quem recolher. */
+    bool temFalaPronta() const noexcept { return falaPronta.load (std::memory_order_acquire); }
+    bool falandoAgora() const noexcept { return segmentador.estaFalando(); }
+    double duracaoFalaMs() const noexcept { return segmentador.duracaoAtualMs(); }
+    void marcaFalaRecolhida() noexcept { falaPronta.store (false, std::memory_order_release); }
+    const std::vector<float>& trechoDeFala() const noexcept { return segmentador.trecho(); }
+    void limpaTrechoDeFala() noexcept { segmentador.limpaTrecho(); }
+
     /** Sinal pos-trim e pos-DSP, antes do fader e do ON/OFF. */
     const float* preFaderData() const noexcept { return preFader.data(); }
 
@@ -283,10 +324,12 @@ public:
     std::string sourceLabel;
 
 private:
-    std::vector<float> scratch, preFader;
+    std::vector<float> scratch, preFader, bruto;
     double sampleRate = 48000.0;
     AutoTrim      autoTrim;
     AutoMixer     autoMixer;
+    SpeechSegmenter segmentador;
+    std::atomic<bool> falaPronta { false };
     SmoothedGain  trimGain, faderGain;
     std::atomic<float> taps[int (TapPoint::NumTaps)] {
         { kMinusInfDb }, { kMinusInfDb }, { kMinusInfDb }, { kMinusInfDb } };

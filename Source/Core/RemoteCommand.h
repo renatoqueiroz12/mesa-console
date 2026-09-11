@@ -24,6 +24,7 @@ namespace mesa {
         AUTOMACAO OFF       para a automacao de cameras (VT no ar)
         AUTOMACAO ON        volta
         AUTOMACAO HOLD 30   suspende por 30 segundos e volta sozinha
+        TEXTO <frase>       transcricao vinda do reconhecedor de fala
         CH2 MUTE OFF
 
     O nome pode ter espacos: a ACAO e sempre a ultima palavra (ou as duas
@@ -31,7 +32,7 @@ namespace mesa {
 struct RemoteCommand
 {
     enum class Action { None, On, Off, Pause, Fader, Cue, Mute, Trim,
-                        AutomationOn, AutomationOff, AutomationHold };
+                        AutomationOn, AutomationOff, AutomationHold, Texto };
 
     Action action = Action::None;
     int    channel = -1;        // indice 0-based; -1 quando veio por nome
@@ -69,6 +70,17 @@ inline RemoteCommand parseRemoteCommand (const std::string& line)
     RemoteCommand c;
     auto tok = rcSplit (line);
     if (tok.size() < 2) return c;
+
+    // TEXTO leva o resto da linha inteiro, sem interpretar: e frase falada,
+    // pode conter qualquer palavra, inclusive as que sao comando aqui.
+    if (rcUpper (tok[0]) == "TEXTO")
+    {
+        c.action = RemoteCommand::Action::Texto;
+        const auto at = line.find_first_not_of(" \t");
+        const auto sp = line.find(' ', at);
+        if (sp != std::string::npos) c.name = line.substr (sp + 1);
+        return c;
+    }
 
     // globais: nao tem canal. O VT precisa poder calar a automacao sem saber
     // nada sobre a estrutura de canais da mesa.

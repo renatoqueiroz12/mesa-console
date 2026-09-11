@@ -55,6 +55,14 @@ struct MonitorParams
     std::atomic<float> studioDb    { -18.0f };
     std::atomic<float> dimDb       { -12.0f };   // aplicado durante talkback
     std::atomic<bool>  cueToPhones { true };     // CUE sobrepoe o fone quando ativo
+    /** Onde mais o CUE entra. O fone e o costume; monitor e estudio servem a
+        quem opera sem fone ou confere pelo estudio. */
+    std::atomic<bool>  cueToMonitor { false };
+    std::atomic<bool>  cueToStudio  { false };
+    /** Quanto o que ja estava tocando abaixa enquanto o CUE toca. Zero deixa
+        os dois no mesmo nivel; -120 substitui, que era o unico comportamento
+        antes; -12 deixa o programa audivel por baixo. */
+    std::atomic<float> cueDimDb     { -12.0f };
     std::atomic<bool>  talkToStudio{ false };
 
     std::atomic<int> ext1Pair    { -1 };   // par de ENTRADAS para a externa 1
@@ -115,6 +123,8 @@ public:
         monitorMeter.prepare (sampleRate);
 
         masterGain.prepare (sampleRate, 25.0f); masterGain.setTargetDb (0.0f); masterGain.snap();
+        for (auto* g : { &monCueGain, &phCueGain, &stCueGain })
+        { g->prepare (sampleRate, 25.0f); g->setTargetDb (0.0f); g->snap(); }
         monGain   .prepare (sampleRate, 30.0f); monGain.snap();
         phGain    .prepare (sampleRate, 30.0f); phGain.snap();
         stGain    .prepare (sampleRate, 30.0f); stGain.snap();
@@ -164,9 +174,21 @@ public:
                 if (mutesStudio (type))      studioMicOpen = true;
             }
 
+            // PAN COM UNIDADE NO CENTRO.
+            //
+            // A regra de potencia constante (seno/cosseno) entrega 0,707 para
+            // cada lado no centro — exatos 3 dB a menos. Ela e certa para
+            // posicionar uma fonte no estereo, e errada para console de radio:
+            // aqui um microfone com fader em 0 tem de sair em UNIDADE, e a
+            // mesa tem de bater com qualquer outra fonte tocando na mesma
+            // saida. Era por isso que o audio da mesa saia mais baixo que o
+            // mesmo material tocado pelo Windows.
+            //
+            // No centro os dois lados recebem 1,0. O pan so desequilibra a
+            // partir dai, atenuando o lado oposto.
             const float p  = std::clamp (ch.params.panPos.load (std::memory_order_relaxed), -1.0f, 1.0f);
-            const float a  = (p + 1.0f) * 0.25f * kPi;
-            const float gl = std::cos (a), gr = std::sin (a);
+            const float gl = p <= 0.0f ? 1.0f : 1.0f - p;
+            const float gr = p >= 0.0f ? 1.0f : 1.0f + p;
 
             const unsigned mask = ch.params.busMask.load (std::memory_order_relaxed);
             for (int b = 0; b < kNumBuses; ++b)
@@ -284,9 +306,21 @@ private:
                                    && ch.params.on.load (std::memory_order_relaxed);
             const float* own = ch.processedData();
 
+            // PAN COM UNIDADE NO CENTRO.
+            //
+            // A regra de potencia constante (seno/cosseno) entrega 0,707 para
+            // cada lado no centro — exatos 3 dB a menos. Ela e certa para
+            // posicionar uma fonte no estereo, e errada para console de radio:
+            // aqui um microfone com fader em 0 tem de sair em UNIDADE, e a
+            // mesa tem de bater com qualquer outra fonte tocando na mesma
+            // saida. Era por isso que o audio da mesa saia mais baixo que o
+            // mesmo material tocado pelo Windows.
+            //
+            // No centro os dois lados recebem 1,0. O pan so desequilibra a
+            // partir dai, atenuando o lado oposto.
             const float p  = std::clamp (ch.params.panPos.load (std::memory_order_relaxed), -1.0f, 1.0f);
-            const float a  = (p + 1.0f) * 0.25f * kPi;
-            const float gl = std::cos (a), gr = std::sin (a);
+            const float gl = p <= 0.0f ? 1.0f : 1.0f - p;
+            const float gr = p >= 0.0f ? 1.0f : 1.0f + p;
             const float masterG = (bus == 0) ? masterGain.currentGain() : 1.0f;
 
             const bool talking = ch.params.talkTo.load (std::memory_order_relaxed);
@@ -330,19 +364,49 @@ private:
         // monitor do controle: mudo enquanto houver microfone do CR aberto
         monGain.setTargetDb (crMicOpen ? kMinusInfDb
                                        : monitor.monitorDb.load (std::memory_order_relaxed) + dim);
-        // fone do operador nao muta; o CUE e que o sobrepoe
-        const bool cueOverride = cueActive && monitor.cueToPhones.load (std::memory_order_relaxed);
-        phGain .setTargetDb (cueOverride ? kMinusInfDb
-                                         : monitor.phonesDb.load (std::memory_order_relaxed));
+        // CUE: onde entra e quanto abaixa o que ja estava tocando.
+        //
+        // Zero de dim faz o CUE SUBSTITUIR o programa naquela saida — que era
+        // o unico comportamento antes. Valores negativos deixam o programa
+        // audivel por baixo, que e como se confere um corte sem perder o ar de
+        // vista. Quem opera escolhe, porque depende do gosto e do estudio.
+        const float cueDim = cueActive ? monitor.cueDimDb.load (std::memory_order_relaxed)
+                                       : 0.0f;
+
+        const bool cueNoFone    = cueActive && monitor.cueToPhones .load (std::memory_order_relaxed);
+        const bool cueNoMonitor = cueActive && monitor.cueToMonitor.load (std::memory_order_relaxed);
+        const bool cueNoEstudio = cueActive && monitor.cueToStudio .load (std::memory_order_relaxed);
+
+        monGain.setTargetDb (crMicOpen ? kMinusInfDb
+                                       : monitor.monitorDb.load (std::memory_order_relaxed) + dim
+                                             + (cueNoMonitor ? cueDim : 0.0f));
+        phGain .setTargetDb (monitor.phonesDb.load (std::memory_order_relaxed)
+                                 + (cueNoFone ? cueDim : 0.0f));
         cueGain.setTargetDb (monitor.cueDb.load (std::memory_order_relaxed));
+
+        // O FADER DA SAIDA continua mandando enquanto o CUE toca.
+        //
+        // O CUE era somado depois do ganho do monitor, entao com o DIM no mudo
+        // o operador ficava sem controle nenhum: o fader da direita nao mexia
+        // no que ele estava ouvindo. Injetamos o CUE atraves do MESMO nivel da
+        // saida — sem o dim, que e o que abaixa o programa — para que abaixar o
+        // volume abaixe tudo, inclusive o CUE.
+        monCueGain.setTargetDb (crMicOpen ? kMinusInfDb
+                                          : monitor.monitorDb.load (std::memory_order_relaxed));
+        phCueGain .setTargetDb (monitor.phonesDb.load (std::memory_order_relaxed));
+        stCueGain .setTargetDb (studioMicOpen ? kMinusInfDb
+                                              : monitor.studioDb.load (std::memory_order_relaxed));
         stGain .setTargetDb (studioMicOpen ? kMinusInfDb
-                                           : monitor.studioDb.load (std::memory_order_relaxed) + dim);
+                                           : monitor.studioDb.load (std::memory_order_relaxed) + dim
+                                                 + (cueNoEstudio ? cueDim : 0.0f));
 
         for (int i = 0; i < n; ++i)
         {
             const float l = srcL ? srcL[i] : 0.0f, r = srcR ? srcR[i] : 0.0f;
             const float mg = monGain.next(), pg = phGain.next(),
                         cg = cueGain.next(), sg = stGain.next();
+            const float mcg = monCueGain.next(), pcg = phCueGain.next(),
+                        scg = stCueGain.next();
 
             monL[size_t (i)] = l * mg;  monR[size_t (i)] = r * mg;
             phL [size_t (i)] = l * pg;  phR [size_t (i)] = r * pg;
@@ -350,7 +414,13 @@ private:
             stR [size_t (i)] = busR[0][size_t (i)] * sg;
 
             cueL[size_t (i)] *= cg;     cueR[size_t (i)] *= cg;
-            if (cueOverride) { phL[size_t (i)] += cueL[size_t (i)]; phR[size_t (i)] += cueR[size_t (i)]; }
+
+            if (cueNoFone)
+            { phL [size_t (i)] += cueL[size_t (i)] * pcg; phR [size_t (i)] += cueR[size_t (i)] * pcg; }
+            if (cueNoMonitor)
+            { monL[size_t (i)] += cueL[size_t (i)] * mcg; monR[size_t (i)] += cueR[size_t (i)] * mcg; }
+            if (cueNoEstudio)
+            { stL [size_t (i)] += cueL[size_t (i)] * scg; stR [size_t (i)] += cueR[size_t (i)] * scg; }
         }
     }
 
@@ -368,6 +438,8 @@ private:
     std::vector<float> cueL, cueR, monL, monR, phL, phR, stL, stR, talkBus, recL, recR;
     std::vector<std::vector<float>> backfeed;
     SmoothedGain masterGain, monGain, phGain, stGain, cueGain;
+    /** Nivel da saida aplicado ao CUE: e o fader da direita, sem o dim. */
+    SmoothedGain monCueGain, phCueGain, stCueGain;
     double sr = 48000.0; int maxBlock = 512;
 };
 

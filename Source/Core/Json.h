@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <cstdio>
 #include <vector>
 #include <utility>
 #include <cstdlib>
@@ -49,8 +50,21 @@ inline void escape (const std::string& s, std::string& out)
             case '"':  out += "\\\""; break;
             case '\\': out += "\\\\"; break;
             case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
             case '\t': out += "\\t";  break;
-            default:   out += c;      break;
+            default:
+                // TODO caractere de controle precisa sair escapado, e nao so
+                // os quatro que a gente lembra. O XML do dispositivo de audio
+                // vem com retorno de carro, e um so bastou para deixar o
+                // settings.json ilegivel para qualquer outro programa.
+                if (static_cast<unsigned char> (c) < 0x20)
+                {
+                    char b[8];
+                    std::snprintf (b, sizeof (b), "\\u%04x", c & 0xff);
+                    out += b;
+                }
+                else out += c;
+                break;
         }
     }
 }
@@ -121,7 +135,20 @@ inline bool parseString (const std::string& s, size_t& i, std::string& out)
             switch (s[i])
             {
                 case 'n': out += '\n'; break;
+                case 'r': out += '\r'; break;
                 case 't': out += '\t'; break;
+                case 'u':
+                    // O leitor precisa entender o que o escritor produz. Sem
+                    // isto, a mesa gravaria certo e leria errado — o estado do
+                    // dispositivo de audio voltaria corrompido, que e pior que
+                    // nao voltar.
+                    if (i + 4 < s.size())
+                    {
+                        const auto hex = s.substr (i + 1, 4);
+                        out += char (std::stoi (hex, nullptr, 16));
+                        i += 4;
+                    }
+                    break;
                 default:  out += s[i]; break;
             }
         }

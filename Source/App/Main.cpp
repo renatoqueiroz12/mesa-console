@@ -1,5 +1,7 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "MainComponent.h"
+#include "../Core/NomeDaThread.h"
+#include "../Core/Version.h"
 
 class MesaApplication : public juce::JUCEApplication
 {
@@ -16,8 +18,18 @@ public:
         {
             auto f = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
                         .getParentDirectory().getChildFile ("mesa-crash.log");
+            // QUAL thread caiu.
+            //
+            // A pilha do Windows vem sem os nossos simbolos e termina em
+            // BaseThreadInitThunk: da para saber que morreu numa thread
+            // secundaria e nao qual. Com o nome, a busca deixa de ser no
+            // escuro — desde que cada thread nossa se apresente (ver os
+            // setCurrentThreadName espalhados pelo codigo).
+            const auto nome = mesa::nomeDaThread();
+
             f.appendText (juce::Time::getCurrentTime().toString (true, true, true, true)
-                          + "  QUEDA\n" + juce::SystemStats::getStackBacktrace() + "\n\n",
+                          + "  QUEDA na thread \"" + nome + "\"\n"
+                          + juce::SystemStats::getStackBacktrace() + "\n\n",
                           false, false, "\n");
         });
 
@@ -50,7 +62,8 @@ private:
     {
     public:
         explicit MainWindow (const juce::String& title)
-            : DocumentWindow (title, juce::Colours::black, DocumentWindow::allButtons)
+            : DocumentWindow (title + "  v" + mesa::kVersion,
+                              juce::Colours::black, DocumentWindow::allButtons)
         {
             // Sem barra de titulo do sistema: a mesa ocupa a tela inteira,
             // inclusive por cima da barra de tarefas. Numa mesa de ar, ver o

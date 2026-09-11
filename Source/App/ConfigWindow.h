@@ -6,12 +6,15 @@
 #include "../Core/SourceCatalog.h"
 #include "../Core/Version.h"
 #include <map>
+#include <algorithm>
 #include "../Core/AutomationEngine.h"
 #include "NdiEngine.h"
 #include "SecondaryDevices.h"
 #include "LivewireReceiver.h"
 #include "LivewireSender.h"
 #include "LwrpClient.h"
+#include "LivewireBrowser.h"
+#include "LivewireScanner.h"
 #include "VmixClient.h"
 #include "../Core/Defaults.h"
 
@@ -47,13 +50,27 @@ public:
         l->setFont (theme::mono (11.0f));
         l->setColour (juce::Label::textColourId, theme::text);
         addAndMakeVisible (l);
+        semRoda (control);
         addAndMakeVisible (control);
         items.add ({ l, control, height });
         return control;
     }
 
+    /** Tira a roda do mouse dos controles.
+
+        A roda existe para ROLAR A PAGINA. Com ela ativa nos controles, passar
+        o mouse por cima enquanto se rola a tela muda nivel, threshold e trim
+        sem ninguem clicar em nada — e o operador so descobre depois, no ar.
+        Ajuste de valor exige agarrar o controle, que e o gesto deliberado. */
+    static void semRoda (juce::Component* c)
+    {
+        if (auto* sl = dynamic_cast<juce::Slider*> (c))   sl->setScrollWheelEnabled (false);
+        if (auto* cb = dynamic_cast<juce::ComboBox*> (c)) cb->setScrollWheelEnabled (false);
+    }
+
     void addWide (juce::Component* c, int height)
     {
+        semRoda (c);
         addAndMakeVisible (c);
         items.add ({ nullptr, c, height });
     }
@@ -98,6 +115,10 @@ public:
 class CfgScroller : public juce::Component
 {
 public:
+    /** Onde a rolagem esta, para sobreviver a uma reconstrucao da aba. */
+    int posicaoDaRolagem() const { return viewport.getViewPositionY(); }
+    void vaiPara (int y) { viewport.setViewPosition (0, y); }
+
     explicit CfgScroller (CfgPage* p) : page (p)
     {
         viewport.setViewedComponent (page, true);
@@ -116,7 +137,8 @@ private:
 
 /** Painel de configuracoes: as 9 abas do mockup, ligadas a mesa::Settings.
     O que e de instalacao mora aqui; o que e de show mora na cena. */
-class ConfigComponent : public juce::Component
+class ConfigComponent : public juce::Component,
+                        private juce::Timer
 {
 public:
     ConfigComponent (mesa::Settings& s, mesa::MixerEngine& m,
@@ -135,12 +157,28 @@ public:
         saveButton.onClick = [this] { save(); };
         addAndMakeVisible (saveButton);
 
+        // Versao no rodape desta janela.
+        //
+        // Ela ja aparece na barra de status da mesa, mas essa barra some
+        // quando a janela nao esta em tela cheia — e e justamente nas
+        // configuracoes que a pergunta "que versao esta rodando?" aparece.
+        versaoLabel.setText (juce::String ("v") + mesa::kVersion + "  ("
+                             + mesa::kBuildName + ")", juce::dontSendNotification);
+        versaoLabel.setFont (theme::mono (10.0f));
+        versaoLabel.setColour (juce::Label::textColourId, theme::oledDim);
+        addAndMakeVisible (versaoLabel);
+
         statusLabel.setFont (theme::mono (11.0f));
         statusLabel.setColour (juce::Label::textColourId, theme::textDim);
         addAndMakeVisible (statusLabel);
 
         // enquanto o operador esta escolhendo fonte, a descoberta faz sentido
         NdiEngine::instance().startDiscovery();
+
+        // Procura sozinha, como faz a superficie da Axia. Obrigar o operador a
+        // apertar um botao para so entao poder escolher a fonte e trabalho que
+        // a mesa sabe fazer — e que ele esquece de fazer.
+        procuraLivewire();
 
         setSize (760, 560);
     }
@@ -149,6 +187,11 @@ public:
     std::function<void()> onClosed;
     ~ConfigComponent() override
     {
+        // A varredura precisa morrer ANTES da janela: thread viva mexendo em
+        // objeto destruido e o defeito que derrubou a mesa.
+        stopTimer();
+        varredura.cancela();
+
         // NAO para a descoberta aqui.
         //
         // Parar e religar o NDI a cada abrir e fechar desta janela era o
@@ -167,20 +210,114 @@ public:
         auto bottom = r.removeFromBottom (40).reduced (12, 6);
         saveButton.setBounds (bottom.removeFromRight (180));
         bottom.removeFromRight (10);
+        versaoLabel.setBounds (bottom.removeFromLeft (200));
+        bottom.removeFromLeft (8);
         statusLabel.setBounds (bottom);
         tabs.setBounds (r);
     }
 
 private:
     // ------------------------------------------------------------------ helpers
+    /** Destino de monitoracao: a lista INTEIRA, como na aba Outputs.
+
+        Antes eram so os pares da placa mestra. Quem tem o monitor noutra placa
+        ou manda fone por Livewire nao tinha como escolher — a mesa sabia
+        fazer, o campo e que nao deixava. Explicar em nota que o caminho era
+        outra aba foi remendo: campo que existe tem de oferecer o que existe.
+
+        Mestra vai pelo caminho direto, sem fila, que e o de menor atraso.
+        Secundaria e rede entram como OutputDef, com alguns milissegundos a
+        mais — e o preco de sair da placa principal. */
+    void destinoDeMonitoracao (CfgPage& p, const juce::String& rotulo, int bus,
+                               int parAtual, std::function<void (int)> aoMudarPar)
+    {
+        const auto lista = availableOutputs (Transport::Asio);
+        const auto lista2 = availableOutputs (Transport::Windows);
+
+        auto* box = new juce::ComboBox();
+        std::vector<Avail> tudo;
+        tudo.push_back ({ "(nao roteado)", int (mesa::InputKind::Device), -1, {} });
+        for (const auto& a : lista)  if (a.index >= 0) tudo.push_back (a);
+        for (const auto& a : lista2) if (a.index >= 0) tudo.push_back (a);
+
+        int sel = 1;
+        for (size_t k = 0; k < tudo.size(); ++k)
+        {
+            box->addItem (tudo[k].label, int (k) + 1);
+            const bool isSec = ! tudo[k].stream.empty() && tudo[k].stream[0] == '\x01';
+            if (! isSec && tudo[k].index == parAtual && parAtual >= 0) sel = int (k) + 1;
+        }
+
+        // ja existe um OutputDef para este barramento? entao e ele o escolhido
+        for (const auto& o : settings.outputs.outputs)
+            if (o.busSource == bus && ! o.deviceName.empty())
+                for (size_t k = 0; k < tudo.size(); ++k)
+                    if (tudo[k].stream.find (o.deviceName) != std::string::npos)
+                        sel = int (k) + 1;
+
+        box->setSelectedId (sel, juce::dontSendNotification);
+
+        box->onChange = [this, box, tudo, bus, aoMudarPar]
+        {
+            const int i = box->getSelectedId() - 1;
+            if (i < 0 || i >= int (tudo.size())) return;
+            const auto& a = tudo[size_t (i)];
+
+            // limpa qualquer OutputDef anterior deste barramento
+            auto& v = settings.outputs.outputs;
+            v.erase (std::remove_if (v.begin(), v.end(),
+                                     [bus] (const mesa::OutputDef& o)
+                                     { return o.busSource == bus && o.name.rfind ("MON ", 0) == 0; }),
+                     v.end());
+
+            const bool isSec = ! a.stream.empty() && a.stream[0] == '\x01';
+            if (! isSec)
+            {
+                aoMudarPar (a.index);        // caminho direto da mestra
+                return;
+            }
+
+            aoMudarPar (-1);                 // sai da mestra
+            const auto resto = a.stream.substr (1);
+            const auto sep   = resto.find ('\x01');
+
+            mesa::OutputDef o;
+            o.name       = "MON " + std::to_string (bus);
+            o.kind       = a.kind;
+            o.pair       = a.index;
+            o.busSource  = bus;
+            o.deviceType = resto.substr (0, sep);
+            o.deviceName = resto.substr (sep + 1);
+            v.push_back (o);
+        };
+
+        p.addRow (rotulo, box);
+    }
+
     juce::ComboBox* pairBox (CfgPage& p, const juce::String& label, int current,
                              std::function<void (int)> onChange, bool inputs = false)
     {
         auto* box = new juce::ComboBox();
         box->addItem ("nao roteado", 1);
-        const int n = inputs ? 8 : 4;
-        for (int i = 0; i < n; ++i)
-            box->addItem (juce::String (i * 2 + 1) + "/" + juce::String (i * 2 + 2), i + 2);
+
+        // Pares da placa de verdade, com os nomes que ela informa.
+        //
+        // Antes eram quatro pares fixos no codigo, numerados a mao. Numa placa
+        // de 10 saidas o operador nao enxergava metade delas, e os rotulos nao
+        // batiam com o que a aba Outputs mostrava — dois lugares falando da
+        // mesma coisa em linguagens diferentes.
+        int n = inputs ? 8 : 4;
+        if (auto* dev = deviceManager.getCurrentAudioDevice())
+        {
+            const auto nomes = inputs ? dev->getInputChannelNames()
+                                      : dev->getOutputChannelNames();
+            n = juce::jmax (1, nomes.size() / 2);
+            for (int i = 0; i + 1 < nomes.size(); i += 2)
+                box->addItem (nomes[i] + " / " + nomes[i + 1], i / 2 + 2);
+        }
+        else
+            for (int i = 0; i < n; ++i)
+                box->addItem (juce::String (i * 2 + 1) + "/" + juce::String (i * 2 + 2), i + 2);
         box->setSelectedId (current < 0 ? 1 : current + 2, juce::dontSendNotification);
         box->onChange = [box, onChange] { onChange (box->getSelectedId() - 2); };
         return p.addRow (label, box);
@@ -223,12 +360,36 @@ private:
 
     /** Redesenha as abas na hora. Sem isso, criar ou remover um canal parece
         nao fazer nada — o dado muda, a tela nao. */
+    /** Reconstroi as abas SEM perder onde a pessoa estava lendo.
+
+        A varredura de rede e a descoberta NDI atualizam a lista sozinhas, e
+        cada atualizacao refazia a aba inteira — a rolagem voltava ao topo no
+        meio de uma leitura, sem que ninguem tivesse tocado em nada. Guardamos
+        a posicao e devolvemos depois de montar. */
     void rebuildTabs()
     {
         const int keep = tabs.getCurrentTabIndex();
+        const int ondeEstava = rolagemAtual();
+
         tabs.clearTabs();
         buildAllTabs();
         tabs.setCurrentTabIndex (juce::jlimit (0, tabs.getNumTabs() - 1, keep));
+
+        if (ondeEstava > 0)
+            juce::MessageManager::callAsync ([this, ondeEstava]
+            {
+                // depois do layout: antes dele a altura ainda e zero e a
+                // posicao seria descartada
+                if (auto* sc = dynamic_cast<CfgScroller*> (tabs.getCurrentContentComponent()))
+                    sc->vaiPara (ondeEstava);
+            });
+    }
+
+    int rolagemAtual() const
+    {
+        if (auto* sc = dynamic_cast<const CfgScroller*> (tabs.getCurrentContentComponent()))
+            return sc->posicaoDaRolagem();
+        return 0;
     }
 
     void buildAllTabs()
@@ -236,6 +397,7 @@ private:
         addTab ("Inputs",      buildCatalog());
         addTab ("Outputs",     buildOutputsTab());
         addTab ("Paginas",     buildPages());
+        addTab ("Rec",         buildRec());
         addTab ("Monitoracao", buildMonitor());
         addTab ("Rede",        buildNetwork());
         addTab ("Automacao",   buildAutomation());
@@ -252,6 +414,10 @@ private:
         para o operador se orientar; o filtro e pelo nome do dispositivo. */
     enum class Transport { Asio = 0, Windows, Livewire, Dante, Ndi };
 
+    /** Id da opcao "sem entrada". Alto de proposito: os ids normais sao a
+        posicao na lista, e o seguinte ja e usado pela opcao "(offline)". */
+    static constexpr int kSemEntrada = 9999;
+
     static bool deviceMatches (Transport t, const juce::String& typeName, const juce::String& devName)
     {
         const auto d = devName.toLowerCase();
@@ -260,8 +426,15 @@ private:
         {
             case Transport::Livewire: return d.contains ("livewire") || d.contains ("axia");
             case Transport::Dante:    return d.contains ("dante");
+            // Windows mostra TUDO, inclusive os dispositivos do driver da Axia.
+            //
+            // Antes eles eram filtrados daqui porque tinham categoria propria.
+            // Quando o tipo Livewire virou recepcao nativa por numero de canal,
+            // esses dispositivos ficaram sem lugar nenhum na interface — e sao
+            // justamente eles que resolvem o caso do PC que gera e consome
+            // Livewire na mesma maquina, onde a recepcao nativa nao alcanca.
             case Transport::Asio:     return typeName == "ASIO" && ! aoip;
-            case Transport::Windows:  return typeName != "ASIO" && ! aoip;
+            case Transport::Windows:  return typeName != "ASIO";
             default:                  return false;
         }
     }
@@ -310,9 +483,21 @@ private:
                 {
                     if (dn == masterName) continue;                      // essa e a mestra
                     if (! deviceMatches (t, typeTag, dn)) continue;
-                    for (int c = 0; c < 8; ++c)
-                        v.push_back ({ "[secundaria " + juce::String (typeTag) + "] "
-                                           + dn + " - entrada " + juce::String (c + 1),
+
+                    // Quantos canais o dispositivo TEM, e nao oito por suposicao.
+                    // Um Livewire In e estereo: as outras seis entradas nao
+                    // existem, e escolher uma delas daria silencio sem aviso.
+                    int quantos = 8;
+                    if (auto* d = dt->createDevice ({}, dn))
+                    {
+                        quantos = juce::jmax (1, d->getInputChannelNames().size());
+                        delete d;
+                    }
+                    for (int c = 0; c < quantos; ++c)
+                        v.push_back ({ "[secundaria " + juce::String (typeTag) + "] " + dn
+                                           + (dn.toLowerCase().contains ("livewire")
+                                                  ? " (driver Axia)" : juce::String())
+                                           + " - entrada " + juce::String (c + 1),
                                        int (mesa::InputKind::Network), c,
                                        (juce::String::charToString (1) + juce::String (typeTag)
                                         + juce::String::charToString (1) + dn).toStdString() });
@@ -334,6 +519,21 @@ private:
             {
                 std::unique_ptr<juce::AudioIODeviceType> wt (
                     juce::AudioIODeviceType::createAudioIODeviceType_WASAPI (juce::WASAPIDeviceMode::shared));
+
+                // Entrada PADRAO do Windows, resolvida na hora de abrir.
+                //
+                // Util quando o dispositivo troca de nome — cabo virtual
+                // reinstalado, placa USB em outra porta — ou quando a mesa vai
+                // para outra maquina: em vez de apontar para um nome que pode
+                // sumir, aponta para "o que o Windows estiver usando".
+                if (t == Transport::Windows)
+                    for (int c = 0; c < 8; ++c)
+                        v.push_back ({ "[secundaria] entrada PADRAO do Windows - canal "
+                                           + juce::String (c + 1),
+                                       int (mesa::InputKind::Network), c,
+                                       (juce::String::charToString (1) + "Windows Audio"
+                                        + juce::String::charToString (1) + "*PADRAO*").toStdString() });
+
                 scan (wt.get(), "Windows Audio");
             }
         }
@@ -499,6 +699,37 @@ private:
 
         p->addTitle ("No Livewire");
         {
+            // Escolha da placa: numa maquina com mais de uma, o Windows decide
+            // sozinho por onde pedir o multicast e costuma decidir errado. O
+            // sintoma e cruel: abre sem erro e nunca recebe pacote.
+            auto* placa = new juce::ComboBox();
+            placa->addItem ("automatica (deduzida da varredura)", 1);
+
+            int selP = 1, idP = 2;
+            for (const auto& ip : juce::IPAddress::getAllAddresses (false))
+            {
+                if (ip.toString() == "127.0.0.1") continue;
+                placa->addItem (ip.toString(), idP);
+                if (ip.toString().toStdString() == settings.livewirePlaca) selP = idP;
+                ++idP;
+            }
+            placa->setSelectedId (selP, juce::dontSendNotification);
+            placa->onChange = [this, placa]
+            {
+                settings.livewirePlaca = placa->getSelectedId() == 1
+                                             ? std::string()
+                                             : placa->getText().toStdString();
+            };
+            p->addRow ("Placa de rede", placa);
+            p->addNote ("A mesma que o painel da Axia chama de Livewire Network Card. "
+                        "Em automatica, a mesa usa a placa que enxerga os equipamentos "
+                        "encontrados na varredura — e o que evita o pior sintoma desta "
+                        "funcao: multicast pedido pela placa errada, que produz silencio "
+                        "sem nenhuma mensagem de erro.");
+            if (! settings.livewirePlaca.empty())
+                p->addRow ("Em uso", makeReadOnly (settings.livewirePlaca));
+        }
+        {
             auto* nodeBox = new juce::TextEditor();
             nodeBox->setText (settings.livewireNode, juce::dontSendNotification);
             nodeBox->setFont (theme::mono (12.0f));
@@ -506,9 +737,79 @@ private:
             { settings.livewireNode = nodeBox->getText().toStdString(); };
             p->addRow ("Endereco do no", nodeBox);
 
-            auto* scan = new juce::TextButton ("LISTAR FONTES DO NO");
+            // Varredura: acha os equipamentos sozinha, sem IP cadastrado.
+            // Endereco muda; nome nao. Cadastro de IP se quebra sozinho meses
+            // depois, e sempre no pior momento.
+            auto* varrer = new juce::TextButton (varredura.emAndamento()
+                                                     ? "VARRENDO..." : "PROCURAR NA REDE");
+            varrer->onClick = [this]
+            {
+                if (varredura.emAndamento()) { varredura.cancela(); stopTimer(); rebuildTabs(); return; }
+                procuraLivewire();     // um caminho so: o mesmo da varredura automatica
+                rebuildTabs();
+            };
+            p->addWide (varrer, 32);
+
+            if (varredura.emAndamento())
+                p->addRow ("Progresso",
+                           makeReadOnly (std::to_string (varredura.progresso()) + " de "
+                                         + std::to_string (varredura.totalEnderecos())
+                                         + " enderecos"));
+
+            for (const auto& a : varredura.resultado())
+                p->addRow (a.equipamento.isEmpty() ? a.ip : a.equipamento,
+                           makeReadOnly ((a.ip + "   " + juce::String (int (a.fontes.size()))
+                                          + " fontes").toStdString()));
+
+            p->addNote ("Procura quem responde ao LWRP na sub-rede desta placa. Nao "
+                        "depende de IP cadastrado nem do multicast de anuncios — se o "
+                        "switch bloquear multicast, isto continua funcionando.");
+
+            auto* scan = new juce::TextButton ("CONSULTAR SO ESTE ENDERECO");
             scan->onClick = [this] { scanLivewire(); };
             p->addRow ("", scan, 30);
+
+            // Escuta dos anuncios: e assim que a lista do QOR se enche com
+            // fontes de OUTROS equipamentos, inclusive o driver da Axia. O
+            // LWRP acima so conhece as fontes do proprio no.
+            auto* ouvir = new juce::TextButton (navegador != nullptr && navegador->ativo()
+                                                    ? "PARAR DE OUVIR A REDE"
+                                                    : "OUVIR ANUNCIOS DA REDE");
+            ouvir->onClick = [this]
+            {
+                if (navegador == nullptr) navegador = std::make_unique<LivewireBrowser>();
+                if (navegador->ativo()) navegador->stop();
+                else navegador->start (juce::String (settings.livewirePlaca));
+                rebuildTabs();
+            };
+            p->addRow ("", ouvir, 30);
+
+            if (navegador != nullptr && navegador->ativo())
+            {
+                juce::String est;
+                est << navegador->pacotes() << " anuncios recebidos";
+                if (navegador->erro().isNotEmpty()) est << "  |  " << navegador->erro();
+                p->addRow ("Anuncios", makeReadOnly (est.toStdString()));
+
+                const auto achadas = navegador->fontes();
+                if (achadas.empty())
+                {
+                    p->addNote ("Nenhuma fonte reconhecida ainda. Se o contador acima esta "
+                                "em zero, o multicast de anuncios nao chega — placa de rede "
+                                "ou IGMP. Se esta subindo mas nada aparece, o formato do "
+                                "anuncio difere do esperado: mande as amostras abaixo.");
+                    for (const auto& linha : navegador->amostrasCruas())
+                        p->addNote (linha);
+                }
+                else
+                {
+                    for (const auto& f : achadas)
+                        p->addRow (juce::String (f.canal),
+                                   makeReadOnly ((f.nome + "   (" + f.origem + ")").toStdString()));
+                    p->addNote ("Estas vieram dos anuncios da rede. Para usar, escolha o "
+                                "canal no campo do input.");
+                }
+            }
 
             p->addRow ("Estado", makeReadOnly (livewireStatus.toStdString()));
             p->addNote ("Consulta o no pelo LWRP, na porta 93, e traz a lista de fontes "
@@ -610,7 +911,12 @@ private:
                 {
                     juce::String txt = juce::String (int (d->sampleRate())) + " Hz  |  +"
                                      + juce::String (d->latencyMs(), 1) + " ms de fila"
-                                     + "  |  falhas " + juce::String (d->glitches());
+                                     + (d->recebendo()
+                                            ? "  |  recebendo"
+                                            : "  |  SEM AUDIO: abriu mas nao entrega nada")
+                                     + "  |  buracos " + juce::String (d->buracos())
+                                     + "  |  faltas " + juce::String (d->faltas())
+                                     + "  |  descartes " + juce::String (d->descartes());
                     if (d->isLost()) txt += "  |  PERDIDA";
                     p->addRow (d->deviceName(), makeReadOnly (txt.toStdString()));
                 }
@@ -671,7 +977,13 @@ private:
                 }
                 if (sel == 1 && src.livewireChannel > 0)
                 {
-                    lwList->addItem (juce::String (src.livewireChannel) + "  (fora da lista)", id);
+                    // Mostra o nome guardado em vez de "(fora da lista)": a
+                    // fonte nao sumiu, so ainda nao varremos a rede nesta
+                    // sessao. Dizer que sumiu assusta sem motivo.
+                    const juce::String rotulo = src.livewireNome.empty()
+                        ? juce::String (src.livewireChannel) + "  (procurando na rede...)"
+                        : juce::String (src.livewireChannel) + "  " + src.livewireNome;
+                    lwList->addItem (rotulo, id);
                     sel = id;
                 }
                 lwList->setSelectedId (sel, juce::dontSendNotification);
@@ -680,8 +992,22 @@ private:
                 lwList->onChange = [lwList, &src, listCopy]
                 {
                     const int i = lwList->getSelectedId() - 2;
+
+                    // escolher "(nenhuma)" LIMPA de verdade: antes caia no
+                    // return abaixo e o canal antigo ficava, entao o input
+                    // continuava ativo com uma fonte que a tela dizia nao ter
+                    if (lwList->getSelectedId() == 1)
+                    {
+                        src.livewireChannel = 0;
+                        src.livewireNome.clear();
+                        return;
+                    }
+
                     if (i < 0 || i >= int (listCopy.size())) return;
                     src.livewireChannel = listCopy[size_t (i)].livewireChannel;
+                    src.livewireNome    = listCopy[size_t (i)].name.toStdString();
+                    src.kind  = int (mesa::InputKind::Network);
+                    src.index = -1;
                     src.kind = int (mesa::InputKind::Network);
                     src.streamName.clear();
                     src.deviceName.clear();
@@ -754,16 +1080,47 @@ private:
                                  int (avail.size()) + 1);
                 sel = int (avail.size()) + 1;
             }
+            srcBox->addItem ("(sem entrada — canal inativo)", kSemEntrada);
+            if (src.index == -1 && src.streamName.empty() && src.deviceName.empty()
+                && src.livewireChannel == 0)
+                sel = kSemEntrada;
+
             srcBox->setSelectedId (sel, juce::dontSendNotification);
             if (avail.size() <= 1)
                 srcBox->setTextWhenNoChoicesAvailable ("nada disponivel neste tipo");
             auto availCopy = avail;
             srcBox->onChange = [srcBox, &src, availCopy]
             {
+                // "(sem entrada)" e escolha legitima, nao falta de escolha: o
+                // canal fica inativo de proposito e a tira anuncia isso. Antes
+                // so dava para apagar o nome, o que parecia defeito.
+                //
+                // Id proprio e alto: os ids normais sao a posicao na lista, e
+                // o seguinte ja pertence a opcao "(offline)".
+                if (srcBox->getSelectedId() == kSemEntrada)
+                {
+                    src.kind  = int (mesa::InputKind::Device);
+                    src.index = -1;
+                    src.deviceName.clear();
+                    src.streamName.clear();
+                    src.livewireChannel = 0;
+                    src.livewireNome.clear();
+                    return;
+                }
+
                 const int i = srcBox->getSelectedId() - 1;
                 if (i < 0 || i >= int (availCopy.size())) return;
                 const auto& a = availCopy[size_t (i)];
                 src.kind = a.kind;
+
+                // Escolher dispositivo APAGA o canal Livewire.
+                //
+                // Sem isto, um input que ja tivera canal Livewire voltava como
+                // Livewire ao reabrir a tela — a deducao do tipo olha o canal
+                // antes do dispositivo — e o dispositivo escolhido sumia. Duas
+                // fontes gravadas ao mesmo tempo, uma delas fantasma.
+                src.livewireChannel = 0;
+                src.livewireNome.clear();
 
                 // marcador \x01 no campo stream distingue placa secundaria de NDI
                 if (! a.stream.empty() && a.stream[0] == '\x01')
@@ -787,8 +1144,10 @@ private:
             if (avail.size() <= 1)
                 p->addNote (t == Transport::Ndi
                     ? "Nenhum emissor NDI visto na rede agora. Confira a aba Rede."
-                    : "Nenhuma entrada disponivel neste tipo. Veja a placa mestra acima, "
-                      "ou tente outro tipo.");
+                    : t == Transport::Asio
+                      ? "Nenhuma entrada ASIO. A placa mestra tem entradas? Para cabo "
+                        "virtual e placas do Windows, troque o Tipo para Windows."
+                      : "Nenhuma entrada disponivel neste tipo. Tente outro tipo.");
 
             }
 
@@ -806,6 +1165,27 @@ private:
             camBox->setSelectedId (src.camera + 1, juce::dontSendNotification);
             camBox->onChange = [camBox, &src] { src.camera = camBox->getSelectedId() - 1; };
             p->addRow ("Camera", camBox);
+
+            toggle (*p, "Transcrever a fala deste input", src.transcrever,
+                    [&src] (bool v) { src.transcrever = v; });
+
+            dbSlider (*p, "Fala: nivel minimo", src.falaThresholdDb, -70.0f, -20.0f,
+                      [&src] (float v) { src.falaThresholdDb = v; });
+            {
+                auto* maxMs = new juce::Slider (juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight);
+                maxMs->setRange (3000.0, 30000.0, 500.0);
+                maxMs->setValue (src.falaMaxTrechoMs, juce::dontSendNotification);
+                maxMs->onValueChange = [maxMs, &src] { src.falaMaxTrechoMs = float (maxMs->getValue()); };
+                p->addRow ("Fala: trecho maximo (ms)", maxMs);
+                p->addNote ("Fala continua — musica, locucao sem pausa — nunca entrega o "
+                            "silencio que fecharia o trecho. Este teto garante que o "
+                            "arquivo saia mesmo assim.");
+            }
+
+            p->addNote ("Medido na ENTRADA do canal, antes de trim e fader: o texto do que "
+                        "foi dito nao deve depender de onde o operador deixou o fader. "
+                        "Se nao gravar nada, veja o medidor IN da tira — o nivel precisa "
+                        "passar deste valor com folga.");
 
             p->addTitle ("GPIO deste input");
 
@@ -994,19 +1374,100 @@ private:
     }
 
     /** Guarda o tipo escolhido por linha; sem escolha, deduz do que esta gravado. */
+    /** Deduz o transporte a partir do que esta GRAVADO.
+
+        Cuidado aqui: placa secundaria e tratada internamente como "rede",
+        porque entra pela mesma fila assincrona. Como NDI era o primeiro caso
+        de rede testado, um cabo virtual do Windows reaparecia como NDI ao
+        reabrir a tela — o dado estava certo, o campo mostrado e que mentia.
+        Quem decide e o campo preenchido, nao o tipo interno. */
     Transport inputTransport (size_t i, const mesa::SourceDef& d) const
     {
         auto it = inputT.find (i);
         if (it != inputT.end()) return Transport (it->second);
-        if (d.livewireChannel > 0) return Transport::Livewire;
-        return d.kind == int (mesa::InputKind::Network) ? Transport::Ndi : Transport::Asio;
+
+        if (d.livewireChannel > 0)   return Transport::Livewire;
+        if (! d.streamName.empty())  return Transport::Ndi;
+        if (! d.deviceName.empty())  return transporteDoDispositivo (d.deviceType, d.deviceName);
+        return Transport::Asio;
+    }
+
+    /** Placa secundaria: o tipo vem do DRIVER, nunca do nome.
+
+        Nome nao decide transporte. "Livewire In 03" e um dispositivo WDM do
+        driver da Axia — Windows, portanto —, e nao recepcao Livewire nativa.
+        Deduzir pelo nome fazia a tela abrir o formulario de canal multicast
+        para um input que na verdade e placa: o resumo da lista mostrava o
+        dispositivo certo e o detalhe aparecia vazio, como se a fonte tivesse
+        sumido.
+
+        Recepcao nativa se reconhece por ter numero de canal preenchido, e isso
+        e decidido antes de chegar aqui. */
+    static Transport transporteDoDispositivo (const std::string& tipo, const std::string&)
+    {
+        return juce::String (tipo) == "ASIO" ? Transport::Asio : Transport::Windows;
     }
     Transport outputTransport (size_t i, const mesa::OutputDef& o) const
     {
         auto it = outputT.find (i);
         if (it != outputT.end()) return Transport (it->second);
-        if (o.livewireChannel > 0) return Transport::Livewire;
-        return o.kind == int (mesa::InputKind::Network) ? Transport::Ndi : Transport::Asio;
+
+        if (o.livewireChannel > 0)   return Transport::Livewire;
+        if (! o.streamName.empty())  return Transport::Ndi;
+        if (! o.deviceName.empty())  return transporteDoDispositivo (o.deviceType, o.deviceName);
+        return Transport::Asio;
+    }
+
+    /** Gravacao de programa. */
+    CfgPage* buildRec()
+    {
+        auto* p = new CfgPage();
+        p->addTitle ("Gravacao");
+
+        textBox (*p, "Pasta", settings.recPasta,
+                 [this] (const juce::String& v) { settings.recPasta = v.toStdString(); });
+        p->addNote ("Vazio grava em uma subpasta 'gravacoes' junto da configuracao.");
+
+        auto* ponto = new juce::ComboBox();
+        ponto->addItem ("Entrada crua do canal", 1);
+        ponto->addItem ("Canal pos-fader", 2);
+        ponto->addItem ("Programa (PGM 1)", 3);
+        ponto->setSelectedId (settings.recPonto + 1, juce::dontSendNotification);
+        ponto->onChange = [this, ponto] { settings.recPonto = ponto->getSelectedId() - 1; };
+        p->addRow ("O que gravar", ponto);
+        p->addNote ("Entrada crua nao passa por trim, DSP nem fader — e o que serve para "
+                    "diagnosticar defeito de audio, porque nao carrega nada nosso. "
+                    "Pos-fader grava o que o canal entrega. Programa grava o PGM 1 e "
+                    "independe de canal.");
+
+        auto* bits = new juce::ComboBox();
+        bits->addItem ("16 bits", 1);
+        bits->addItem ("24 bits", 2);
+        bits->addItem ("32 bits", 3);
+        bits->setSelectedId (settings.recBits == 16 ? 1 : settings.recBits == 32 ? 3 : 2,
+                             juce::dontSendNotification);
+        bits->onChange = [this, bits]
+        {
+            const int id = bits->getSelectedId();
+            settings.recBits = id == 1 ? 16 : id == 3 ? 32 : 24;
+        };
+        p->addRow ("Resolucao", bits);
+        p->addNote ("24 bits e o padrao: sobra margem e nao acrescenta ruido proprio. "
+                    "16 bits ocupa menos disco e basta para arquivo de programa.");
+
+        toggle (*p, "Gravar na taxa da placa", settings.recTaxaDaPlaca,
+                [this] (bool v) { settings.recTaxaDaPlaca = v; });
+        p->addNote ("Ligado grava na taxa em que a placa esta rodando, sem conversao — "
+                    "menos processamento e nenhuma chance de estragar o material.");
+
+        p->addTitle ("Transporte");
+        p->addNote ("Os tres botoes ficam no pe da coluna esquerda da mesa: gravar, "
+                    "pausar e parar. Pausar mantem o arquivo aberto e retomar continua "
+                    "no mesmo, sem emenda; parar fecha e o proximo comeca outro.");
+        p->addNote ("O REC de cada tira grava aquele canal. O botao do transporte grava o "
+                    "canal com CUE ligado, ou o primeiro com fonte.");
+
+        return p;
     }
 
     /** Paginas: mapa de posicao de fader para nome de fonte. */
@@ -1068,12 +1529,32 @@ private:
     {
         auto* p = new CfgPage();
         p->addTitle ("Saidas de monitoracao");
-        pairBox (*p, "Monitor do controle", settings.routing.monitorOutputPair,
-                 [this] (int v) { settings.routing.monitorOutputPair = v; });
-        pairBox (*p, "Fone do operador", settings.routing.phonesOutputPair,
-                 [this] (int v) { settings.routing.phonesOutputPair = v; });
-        pairBox (*p, "Monitor do estudio", settings.routing.studioOutputPair,
-                 [this] (int v) { settings.routing.studioOutputPair = v; });
+        destinoDeMonitoracao (*p, "Monitor do controle", 5,
+                              settings.routing.monitorOutputPair,
+                              [this] (int v) { settings.routing.monitorOutputPair = v; });
+        destinoDeMonitoracao (*p, "Fone do operador", 6,
+                              settings.routing.phonesOutputPair,
+                              [this] (int v) { settings.routing.phonesOutputPair = v; });
+        destinoDeMonitoracao (*p, "Monitor do estudio", 7,
+                              settings.routing.studioOutputPair,
+                              [this] (int v) { settings.routing.studioOutputPair = v; });
+        destinoDeMonitoracao (*p, "CUE", 4,
+                              settings.routing.cueOutputPair,
+                              [this] (int v) { settings.routing.cueOutputPair = v; });
+
+        {
+            juce::String jaCriados;
+            for (const auto& o : settings.outputs.outputs)
+                if (o.busSource >= 4)
+                {
+                    if (jaCriados.isNotEmpty()) jaCriados << "; ";
+                    static const char* nomes[] = { "CUE", "Monitor CR", "Fone", "Estudio" };
+                    jaCriados << nomes[juce::jlimit (0, 3, o.busSource - 4)]
+                              << " -> " << juce::String (o.name);
+                }
+            if (jaCriados.isNotEmpty())
+                p->addRow ("Ja na aba Outputs", makeReadOnly (jaCriados.toStdString()));
+        }
 
         p->addTitle ("Fontes externas");
         pairBox (*p, "EXT 1 (entradas)", settings.routing.ext1InputPair,
@@ -1092,8 +1573,47 @@ private:
                   [this] (float v) { mix.monitor.studioDb.store (v); });
         dbSlider (*p, "DIM no talkback", mix.monitor.dimDb.load(), -40.0f, 0.0f,
                   [this] (float v) { mix.monitor.dimDb.store (v); });
-        toggle (*p, "CUE sobrepoe o fone", mix.monitor.cueToPhones.load(),
-                [this] (bool v) { mix.monitor.cueToPhones.store (v); });
+        p->addTitle ("CUE: onde entra");
+        toggle (*p, "CUE entra no fone", settings.routing.cueToPhones,
+                [this] (bool v)
+                { settings.routing.cueToPhones = v; mix.monitor.cueToPhones.store (v); });
+        toggle (*p, "CUE entra no monitor", settings.routing.cueToMonitor,
+                [this] (bool v)
+                { settings.routing.cueToMonitor = v; mix.monitor.cueToMonitor.store (v); });
+        toggle (*p, "CUE entra no estudio", settings.routing.cueToStudio,
+                [this] (bool v)
+                { settings.routing.cueToStudio = v; mix.monitor.cueToStudio.store (v); });
+
+        // Escala util ATE o mudo, sem escala enganosa.
+        //
+        // Ela ia a -120: o meio do curso caia em -60, que na pratica ja cala o
+        // programa, e quem procurava "abaixa um pouco" achava silencio. Agora
+        // o curso util e -40..0, e o ultimo passo — e so ele — e MUDO, para
+        // quem quer ouvir SO o CUE. Os dois casos existem e agora convivem sem
+        // um atrapalhar o outro.
+        {
+            auto* sl = new juce::Slider (juce::Slider::LinearHorizontal,
+                                         juce::Slider::TextBoxRight);
+            sl->setRange (-41.0, 0.0, 0.5);
+            sl->setValue (settings.routing.cueDimDb <= -41.0f ? -41.0
+                                                              : settings.routing.cueDimDb,
+                          juce::dontSendNotification);
+            sl->textFromValueFunction = [] (double v)
+            { return v <= -41.0 ? juce::String ("MUDO") : juce::String (v, 1); };
+            sl->onValueChange = [this, sl]
+            {
+                const double v = sl->getValue();
+                // o ultimo passo vira silencio de verdade, nao -41 dB
+                const float db = v <= -41.0 ? -120.0f : float (v);
+                settings.routing.cueDimDb = db;
+                mix.monitor.cueDimDb.store (db);
+            };
+            p->addRow ("DIM do CUE", sl);
+        }
+        p->addNote ("Quanto o que ja estava tocando abaixa enquanto o CUE toca. No fundo da "
+                    "escala o CUE SUBSTITUI — era o unico comportamento antes. Em -12 o "
+                    "programa fica audivel por baixo, que e como se confere um corte sem "
+                    "perder o ar de vista. Zero deixa os dois no mesmo nivel.");
 
         p->addNote ("Mic aberto no controle muta o monitor automaticamente. "
                     "Isso vem do TIPO da fonte, nao de um botao.");
@@ -1133,6 +1653,56 @@ private:
                  [this] (const juce::String& v) { settings.network.discoveryServer = v.toStdString(); });
         toggle (*p, "Preferir multicast", settings.network.preferMulticast,
                 [this] (bool v) { settings.network.preferMulticast = v; });
+
+        p->addTitle ("Transcricao (experimental)");
+        toggle (*p, "Gravar trechos de fala", settings.falaEnabled,
+                [this] (bool v) { settings.falaEnabled = v; });
+        textBox (*p, "Pasta dos trechos", settings.falaPasta,
+                 [this] (const juce::String& v) { settings.falaPasta = v.toStdString(); });
+        p->addNote ("A mesa corta a fala em trechos e grava em WAV 16 kHz. Quem transcreve "
+                    "e um programa SEPARADO, que le a pasta e devolve o texto pela porta "
+                    "8890. Isso e proposital: reconhecimento de fala e pesado e trava com "
+                    "frequencia — dentro da mesa, uma travada dessas tiraria a emissora do "
+                    "ar. Marque quais inputs transcrever na aba Inputs. Exige reabrir.");
+
+        toggle (*p, "Transcricao em TEMPO REAL", settings.falaTempoReal,
+                [this] (bool v) { settings.falaTempoReal = v; });
+
+        {
+            auto* chave = new juce::TextEditor();
+            chave->setText (settings.falaChave, juce::dontSendNotification);
+            chave->setFont (theme::mono (11.0f));
+            chave->setPasswordCharacter (juce::juce_wchar ('*'));
+            chave->onTextChange = [this, chave]
+            { settings.falaChave = chave->getText().trim().toStdString(); };
+            p->addRow ("Chave da API", chave);
+            textBox (*p, "Transcritor (script)", settings.falaScript,
+                     [this] (const juce::String& v) { settings.falaScript = v.toStdString(); });
+            textBox (*p, "Python", settings.falaPython,
+                     [this] (const juce::String& v) { settings.falaPython = v.toStdString(); });
+            p->addNote ("A mesa inicia o transcritor sozinha ao abrir e o encerra ao fechar. "
+                        "Vazio procura transcritor_tempo_real.py ao lado do executavel e usa "
+                        "o 'python' do sistema. Ele roda como processo separado de proposito: "
+                        "rede com TLS dentro do processo de audio ja derrubou esta mesa duas "
+                        "vezes, e assim uma falha da API nao tira a emissora do ar.");
+            p->addNote ("Guardada aqui para nao precisar passar na linha de comando toda "
+                        "vez. O transcritor le com --chave-da-mesa. Fica escondida na tela, "
+                        "mas o settings.json e texto puro — trate a maquina como confiavel.");
+        }
+        p->addNote ("Manda audio continuo para o transcritor externo, em vez de gravar "
+                    "trecho e esperar ele fechar. O texto chega em menos de um segundo, "
+                    "contra os cerca de 17 do caminho por arquivo. Precisa do "
+                    "transcritor_tempo_real.py rodando. Exige reabrir.");
+
+        {
+            auto* abrirT = new juce::TextButton ("ABRIR AS TRANSCRICOES");
+            abrirT->onClick = [this]
+            { settingsFile.getParentDirectory().getChildFile ("transcricoes").revealToUser(); };
+            p->addRow ("", abrirT, 28);
+            p->addNote ("Um arquivo de texto por dia, com hora em cada linha. E o material "
+                        "para responder, com dados, com que frequencia um VT seria acionado "
+                        "por voz e quais expressoes o locutor usa de verdade.");
+        }
 
         p->addTitle ("GPIO");
         toggle (*p, "GPIO habilitado", settings.gpioEnabled,
@@ -1399,6 +1969,45 @@ private:
                                          + "  (" + mesa::kBuildName + ")"));
         p->addRow ("Compilada em", makeReadOnly (std::string (mesa::kBuildDate)));
 
+        p->addTitle ("Gravacoes de diagnostico");
+        p->addNote ("O gravador fica no SOFT de cada canal, aba Validacao. Ele grava a "
+                    "entrada crua, sem nenhum processamento nosso — e a forma de "
+                    "descobrir se um defeito de audio nasce antes ou depois da mesa.");
+
+        // Aviso de conflito bem no alto: dois donos no mesmo par foi o defeito
+        // mais caro desta semana, e a mesa nao dava sinal nenhum.
+        {
+            const auto aviso = mesa::conflitosDeSaida (settings);
+            if (! aviso.empty())
+            {
+                auto* l = new juce::Label ({}, "CONFLITO DE SAIDA: " + aviso);
+                l->setFont (theme::mono (12.0f, true));
+                l->setColour (juce::Label::textColourId, theme::onRed);
+                p->addWide (l, 34);
+                p->addNote ("Dois caminhos no mesmo par nao somam: um sobrescreve o outro, e "
+                            "o que sai depende da ordem interna. O sintoma e som mais baixo "
+                            "ou diferente, sem nenhum erro aparecer. Aponte cada um para um "
+                            "par proprio.");
+            }
+        }
+
+        p->addTitle ("Nivel dos barramentos");
+        p->addNote ("Zero e o correto: o caminho da mesa entrega unidade — fader em 0 sai "
+                    "no mesmo nivel de qualquer outra fonte na mesma saida. Este ajuste "
+                    "existe para casar com equipamento externo que espere outro nivel de "
+                    "referencia, nao para corrigir a mesa.");
+
+        for (int b = 0; b < mesa::kNumBuses; ++b)
+        {
+            auto* sl = new juce::Slider (juce::Slider::LinearHorizontal,
+                                         juce::Slider::TextBoxRight);
+            sl->setRange (-20.0, 20.0, 0.1);
+            sl->setValue (settings.routing.busGainDb[b], juce::dontSendNotification);
+            sl->onValueChange = [this, sl, b]
+            { settings.routing.busGainDb[b] = float (sl->getValue()); };
+            p->addRow ("PGM " + juce::String (b + 1), sl);
+        }
+
         p->addTitle ("Cores da tally");
         p->addNote ("Vermelho no ar nao e universal — cada emissora tem sua convencao. "
                     "O texto se ajusta sozinho para contrastar com a cor escolhida.");
@@ -1442,6 +2051,17 @@ private:
                 rebuildTabs();
             };
             p->addRow ("", padrao, 28);
+        }
+
+        p->addTitle ("Registro tecnico");
+        p->addNote ("O que a mesa esta fazendo — comandos, rede, avisos. Ficava na tela "
+                    "principal, mas defeito se investiga sentado, e a tela do operador vale "
+                    "mais mostrando o que esta sendo dito no ar.");
+        {
+            auto* abrirLog = new juce::TextButton ("ABRIR O REGISTRO");
+            abrirLog->onClick = [this]
+            { settingsFile.getSiblingFile ("mesa.log").revealToUser(); };
+            p->addRow ("", abrirLog, 28);
         }
 
         p->addTitle ("Ajustes de fabrica");
@@ -1504,6 +2124,47 @@ private:
         }
         else { vmixInputs.clear(); vmixStatus = "falhou: " + r.error; }
         rebuildTabs();
+    }
+
+    /** Varredura automatica, com a placa deduzida do resultado. */
+    void procuraLivewire()
+    {
+        if (varredura.emAndamento()) return;
+        varredura.varre (juce::String (settings.livewirePlaca));
+        ultimoAchado = 0;
+        startTimerHz (4);        // acompanha o andamento por aqui
+    }
+
+    /** Acompanha a varredura.
+
+        Antes o fim da varredura chamava de volta a janela a partir da thread
+        dela. Se o operador fechasse as configuracoes no meio — e a varredura
+        levava minutos —, o aviso chegava a um objeto ja destruido e a mesa
+        caia. Perguntar de tempos em tempos e menos elegante e nao tem essa
+        classe de defeito. */
+    void timerCallback() override
+    {
+        const int agora = varredura.quantosAchados();
+        const bool acabou = ! varredura.emAndamento();
+
+        if (agora != ultimoAchado || acabou)
+        {
+            ultimoAchado = agora;
+            livewireSources = varredura.todasAsFontes();
+
+            if (settings.livewirePlaca.empty())
+            {
+                const auto p = varredura.placaDeduzida();
+                if (p.isNotEmpty())
+                {
+                    settings.livewirePlaca = p.toStdString();
+                    if (onLivewirePlaca) onLivewirePlaca (p);
+                }
+            }
+            rebuildTabs();
+        }
+
+        if (acabou) stopTimer();
     }
 
     void scanLivewire()
@@ -1597,10 +2258,19 @@ private:
     SecondaryDevices* secondaries = nullptr;
     juce::TabbedComponent tabs;
     juce::TextButton saveButton;
-    juce::Label statusLabel;
+    juce::Label statusLabel, versaoLabel;
     juce::Label* ndiList = nullptr;
     mutable std::map<size_t, int> inputT, outputT;
     std::vector<LwrpClient::Source> livewireSources;
+    std::unique_ptr<LivewireBrowser> navegador;
+    LivewireScanner varredura;
+    int ultimoAchado = 0;
+
+public:
+    /** Avisa a superficie que a placa mudou, para religar os receptores. */
+    std::function<void (const juce::String&)> onLivewirePlaca;
+
+private:
     int editandoInput = -1;
     juce::String livewireStatus { "nao consultado" };
     std::vector<VmixClient::Input> vmixInputs;

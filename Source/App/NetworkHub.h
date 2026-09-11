@@ -23,6 +23,51 @@ class NetworkHub
 public:
     NetworkHub (AudioEngine& e, SecondaryDevices& sec) : engine (e), secondaries (sec) {}
 
+    /** IP da placa por onde falar Livewire. Vazio = escolha do Windows. */
+    void setPlacaLivewire (const juce::String& ip) { placaLw = ip; }
+
+    /** Para a superficie registrar no log o que a rede esta fazendo.
+
+        Sem isto, "nao entra audio" nao tem investigacao: nao da para saber se
+        o receptor nem foi criado, se foi criado e nada chega, ou se chega e
+        para em outro lugar. Cada um desses tem conserto diferente. */
+    std::function<void (const juce::String&)> aoRegistrar;
+
+    /** Estado das fontes NDI, para o batimento.
+
+        Mesma razao do Livewire e das secundarias: "o NDI esta ruim" nao diz se
+        o emissor entrega mal, se a fila seca ou se o relogio nao casa. Buraco
+        e fila vazia tem conserto diferente. */
+    juce::String estadoNdi()
+    {
+        juce::String t;
+        for (auto& kv : ndi)
+        {
+            if (kv.second.queue == nullptr) continue;
+            t << "  |  NDI " << juce::String (kv.first).substring (0, 18)
+              << (kv.second.ocioso ? " (ocioso)" : "")
+              << " " << juce::String (int (kv.second.queue->amostrasPorSegundo())) << "/s"
+              << " buracos " << juce::String (kv.second.queue->amostrasEmFalta())
+              << " puxadas-ruins " << juce::String (kv.second.queue->badPulls())
+              << " ppm " << juce::String (kv.second.queue->correctionPpm(), 0)
+              << (kv.second.queue->driftSettled() ? "" : " NAO-ASSENTOU");
+        }
+        return t;
+    }
+
+    /** Estado dos receptores Livewire, para o batimento. */
+    juce::String estadoLivewire() const
+    {
+        juce::String t;
+        for (const auto& kv : livewire)
+            t << "  |  LW " << kv.first << " " << juce::String (kv.second.receiver->packets())
+              << " pacotes";
+        for (const auto& kv : lwOut)
+            t << "  |  LW saida " << kv.first << " "
+              << juce::String (kv.second.sender->packets()) << " pacotes";
+        return t;
+    }
+
     /** Percorre o catalogo, garante que cada fonte de rede tenha slot e fila,
         e escreve o slot de volta no SourceDef. */
     void rebind (mesa::SourceCatalog& catalog, double sampleRate, int blockSize)
@@ -32,7 +77,18 @@ public:
 
         for (auto& src : catalog.sources)
         {
-            if (src.kind != int (mesa::InputKind::Network)) continue;
+            // Livewire e NDI valem por si.
+            //
+            // Antes esta linha exigia que a fonte estivesse MARCADA como de
+            // rede. Um input criado como Windows e depois apontado para um
+            // canal Livewire mantinha a marca antiga e nunca chegava aqui: a
+            // lista mostrava a fonte escolhida, o endereco aparecia certo na
+            // tela, e o receptor simplesmente nao existia. Quem manda e o
+            // campo preenchido, nao a marca.
+            const bool ehDeRede = src.kind == int (mesa::InputKind::Network)
+                               || src.livewireChannel > 0
+                               || ! src.streamName.empty();
+            if (! ehDeRede) continue;
             if (slot >= AudioEngine::kMaxNetSlots) break;
 
             const std::string key = keyOf (src);
@@ -123,7 +179,7 @@ public:
                     saida.left ->prepare (blocoLw, 8, sampleRate, 0.35);
                     saida.right->prepare (blocoLw, 8, sampleRate, 0.35);
                     saida.sender = std::make_unique<LivewireSender> (*saida.left, *saida.right);
-                    if (! saida.sender->start (o.livewireChannel, sampleRate))
+                    if (! saida.sender->start (o.livewireChannel, sampleRate, placaLw))
                     {
                         lastLivewireError = saida.sender->error();
                         continue;
@@ -149,6 +205,18 @@ public:
         }
         for (int i = slot; i < AudioEngine::kMaxNetSinks; ++i)
             engine.setNetSink (i, nullptr, nullptr, 0);
+    }
+
+    /** Fecha so os receptores Livewire, para reabrirem na placa certa.
+
+        Trocar a placa nao adianta com receptor ja aberto: ele continua preso
+        ao grupo pela placa antiga ate ser refeito. */
+    void fechaLivewire()
+    {
+        for (auto& kv : livewire) if (kv.second.receiver) kv.second.receiver->stop();
+        livewire.clear();
+        for (auto& kv : lwOut)    if (kv.second.sender)   kv.second.sender->stop();
+        lwOut.clear();
     }
 
     /** Para tudo que abrimos: receptores, transmissores e filas.
@@ -208,7 +276,9 @@ private:
         std::unique_ptr<LivewireReceiver> receiver;
     };
     std::map<int, LwSlot> livewire;
-    juce::String lastLivewireError;
+    void registra (const juce::String& m) { if (aoRegistrar) aoRegistrar (m); }
+
+    juce::String lastLivewireError, placaLw;
 
     struct NdiSlot
     {
@@ -252,11 +322,16 @@ private:
 
             slot.receiver = std::make_unique<LivewireReceiver> (*slot.left, *slot.right,
                                                                 slot.soma.get());
-            if (! slot.receiver->start (channel))
+            if (! slot.receiver->start (channel, placaLw))
             {
                 lastLivewireError = slot.receiver->error();
+                registra ("Livewire canal " + juce::String (channel) + ": FALHOU — "
+                          + slot.receiver->error());
                 return nullptr;
             }
+            registra ("Livewire canal " + juce::String (channel) + ": receptor aberto em "
+                      + slot.receiver->address() + ":5004  placa "
+                      + slot.receiver->placa());
             it = livewire.emplace (channel, std::move (slot)).first;
         }
         // 0 = esquerdo, 1 = direito, 2 = soma dos dois

@@ -1,4 +1,5 @@
 #pragma once
+#include "../Core/NomeDaThread.h"
 #include <juce_core/juce_core.h>
 #include "../Core/RemoteCommand.h"
 #include <atomic>
@@ -111,6 +112,7 @@ private:
 
     void udpLoop()
     {
+        mesa::batizaThread ("comandos-udpLoop");
         char buf[1024];
         while (! quit.load())
         {
@@ -129,6 +131,7 @@ private:
 
     void tcpLoop()
     {
+        mesa::batizaThread ("comandos-tcpLoop");
         char buf[1024];
         while (! quit.load())
         {

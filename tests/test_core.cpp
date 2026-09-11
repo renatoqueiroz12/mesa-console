@@ -5,6 +5,7 @@
 #include "../Source/Core/AsyncSource.h"
 #include "../Source/Core/RateConverter.h"
 #include "../Source/Core/Defaults.h"
+#include "../Source/Core/SpeechSegmenter.h"
 #include "../Source/Core/AutomationEngine.h"
 #include <thread>
 #include <cstdio>
@@ -93,8 +94,11 @@ int main()
         fillSine (ins[1], ph4, 1000.0, sr, dbToGain (-20.0f));
         mix.process (inPtr.data(), 12, outPtr.data(), 8, block);
     }
-    // dois sinais identicos em fase => +6 dB, e o pan central tira 3 dB por lado
-    check (near (mix.masterMeterL.peakDb(), -20.0f + 6.0f - 3.0f, 0.8f),
+    // Dois sinais identicos em fase somam +6 dB. O pan central NAO tira nada:
+    // desde a correcao da lei de pan, centro e unidade nos dois lados — como
+    // manda um console de radio, onde o fader em 0 tem de bater com qualquer
+    // outra fonte na mesma saida.
+    check (near (mix.masterMeterL.peakDb(), -20.0f + 6.0f, 0.8f),
            "soma de 2 canais no PGM1 com pan central");
     check (mix.busMeter[1].peakDb() < -80.0f, "PGM2 permanece em silencio");
 
@@ -1235,6 +1239,281 @@ int main()
         mix.automation.geralInterrompivel.store (true);
         run (0.5, true, false);
         check (autom.camera() == 2, "religada a interrupcao, quem fala assume na hora");
+    }
+
+    // ------------- segmentador de fala funciona com buffer pequeno
+    {
+        // A placa desta instalacao roda em 8 amostras. Com a medida de
+        // abertura sem memoria, o RMS de 8 amostras despencava a cada
+        // cruzamento da onda, zerava a permanencia e o trecho NUNCA abria —
+        // mesmo com o sinal 25 dB acima do limiar.
+        auto testa = [] (int blk, bool som, double segundos)
+        {
+            SpeechSegmenter seg; SpeechSegmenter::Params p;
+            p.enabled.store (true);  p.thresholdDb.store (-42.0f);
+            p.abreMs.store (250.0f); p.fechaMs.store (900.0f);
+            p.minTrechoMs.store (800.0f); p.maxTrechoMs.store (12000.0f);
+            seg.prepare (48000.0, blk);
+
+            std::vector<float> b (size_t (blk), 0.0f);
+            double ph = 0.0;
+            const int n = int (segundos * 48000.0 / blk);
+            for (int i = 0; i < n; ++i)
+            {
+                for (int k = 0; k < blk; ++k)
+                { b[size_t (k)] = som ? 0.2f * std::sin (ph) : 0.0f; ph += 0.09; }
+                seg.process (p, b.data(), blk);
+            }
+            return seg.estaFalando();
+        };
+
+        check (testa (8, true, 2.0),   "abre trecho com buffer de 8 amostras");
+        check (testa (256, true, 2.0), "abre trecho com buffer de 256 amostras");
+        check (! testa (8, false, 2.0), "silencio nao abre trecho");
+    }
+
+    // ------- o aviso de trecho pronto sobrevive ate ser recolhido
+    {
+        // Era atribuicao direta: verdadeiro no bloco em que o trecho fechava,
+        // falso no bloco seguinte — 0,167 ms depois, com buffer de 8. A
+        // interface olha 25 vezes por segundo e nunca pegava, entao o trecho
+        // era montado e descartado sem ninguem ver.
+        MixerEngine mix; mix.prepare (48000.0, 8, 2);
+        auto& ch = mix.channel (0);
+        ch.params.inputIndex.store (0); ch.params.on.store (true);
+        ch.params.fala.enabled.store (true);
+        ch.params.fala.thresholdDb.store (-42.0f);
+        ch.params.fala.abreMs.store (250.0f);
+        ch.params.fala.fechaMs.store (900.0f);
+        ch.params.fala.minTrechoMs.store (800.0f);
+        ch.params.fala.maxTrechoMs.store (2000.0f);
+
+        std::vector<float> in (8), oL (8), oR (8);
+        const float* ins[1] = { in.data() }; float* outs[2] = { oL.data(), oR.data() };
+        double ph = 0.0; int vistos = 0, blocos = 0;
+
+        for (int i = 0; i < int (6.0 * 48000 / 8); ++i)
+        {
+            for (int k = 0; k < 8; ++k) { in[size_t (k)] = 0.25f * std::sin (ph); ph += 0.09; }
+            mix.process (ins, 1, outs, 2, 8);
+            if (++blocos >= 240)      // a interface olhando a 25 Hz
+            {
+                blocos = 0;
+                if (ch.temFalaPronta())
+                { ++vistos; ch.limpaTrechoDeFala(); ch.marcaFalaRecolhida(); }
+            }
+        }
+        check (vistos >= 2, "a interface recolhe os trechos de fala prontos");
+    }
+
+    // -------- JSON sobrevive a caractere de controle no conteudo
+    {
+        // O estado do dispositivo de audio e XML do Windows, com retorno de
+        // carro. Um so caractere desses deixava o settings.json ilegivel para
+        // qualquer outro programa — e foi assim que o transcritor parou de
+        // achar a chave da API.
+        const std::string original = "<DEVICESETUP\r\n  rate=\"48000\"/>\r\n\x01fim";
+
+        json::Value raiz; raiz.type = json::Value::Object;
+        raiz.set ("deviceState", json::text (original));
+        raiz.set ("falaChave",   json::text ("abc123"));
+
+        std::string saida;
+        json::write (raiz, saida);
+
+        bool temControleCru = false;
+        for (unsigned char c : saida)
+            if (c < 0x20 && c != '\n') temControleCru = true;
+        check (! temControleCru, "JSON gravado nao tem caractere de controle cru");
+
+        json::Value lido;
+        check (json::parse (saida, lido), "JSON com escapes volta a ser lido");
+        check (lido.string ("deviceState") == original, "conteudo volta identico");
+        check (lido.string ("falaChave") == "abc123", "os campos seguintes nao se perdem");
+    }
+
+    // -------- pan central entrega UNIDADE, nao 0,707
+    {
+        // A regra de potencia constante tira 3 dB no centro. E certa para
+        // posicionar fonte no estereo e errada para console de radio: aqui um
+        // microfone com fader em 0 tem de sair em unidade, e a mesa tem de
+        // bater com qualquer outra fonte na mesma saida.
+        mesa::MixerEngine mix;
+        mix.prepare (48000.0, 512, 8);
+
+        auto& ch = mix.channel (0);
+        ch.params.on.store (true);
+        ch.params.faderDb.store (0.0f);
+        ch.params.busMask.store (1u);
+        ch.params.panPos.store (0.0f);
+        ch.params.inputIndex.store (0);
+
+        const int n = 256;
+        std::vector<float> ent (size_t (n), 0.5f);
+        const float* in[1] = { ent.data() };
+        std::vector<float> sl (size_t (n), 0.0f), sr (size_t (n), 0.0f);
+        float* out[2] = { sl.data(), sr.data() };
+
+        // os ganhos sao suavizados: sem deixar assentar, mede-se a rampa
+        for (int b = 0; b < 200; ++b) mix.process (in, 1, out, 2, n);
+
+        check (std::fabs (sl[10] - 0.5f) < 0.001f, "pan central: esquerdo em unidade");
+        check (std::fabs (sr[10] - 0.5f) < 0.001f, "pan central: direito em unidade");
+
+        // e o pan ainda funciona: todo a esquerda zera o lado direito
+        ch.params.panPos.store (-1.0f);
+        for (int b = 0; b < 200; ++b) mix.process (in, 1, out, 2, n);
+        check (std::fabs (sl[10] - 0.5f) < 0.001f, "pan a esquerda mantem o esquerdo cheio");
+        check (sr[10] < 0.001f, "pan a esquerda zera o direito");
+    }
+
+    // -------- dois donos no mesmo par de saida sao denunciados
+    {
+        // O defeito mais caro desta semana: o monitor apontado para o mesmo
+        // par do PGM 1. Nao somam — um sobrescreve o outro — e o som sai mais
+        // baixo sem nada acusar erro. So apareceu quando medimos canal a canal.
+        Settings s;
+        // sem monitor roteado nao ha o que colidir
+        check (conflitosDeSaida (s).empty(), "so os barramentos: sem conflito");
+
+        s.routing.monitorOutputPair = s.routing.busOutputPair[0];
+        check (! conflitosDeSaida (s).empty(), "monitor sobre o PGM 1 e denunciado");
+
+        // par 4 em diante nao pertence a nenhum barramento: e onde o monitor
+        // cabe sem disputa numa placa de 8 ou mais saidas
+        s.routing.monitorOutputPair = 4;
+        check (conflitosDeSaida (s).empty(), "em par proprio, sem aviso");
+    }
+
+    // -------- a saida escolhida na aba Outputs sobrevive ao reinicio
+    {
+        // O catalogo guardava a escolha certa e ninguem a aplicava: quem manda
+        // audio para a placa e o roteamento por barramento, e o rebindOutputs
+        // so cuida de destinos de rede. Dava certo na hora e sumia ao reabrir.
+        Settings s;
+        OutputDef o;
+        o.name = "OUTPUT 1";
+        o.busSource = 0;
+        o.pair = 2;                       // PGM 1 nas saidas 5/6
+        o.deviceType = "ASIO";
+        o.kind = int (InputKind::Device);
+        s.outputs.outputs.push_back (o);
+
+        const auto txt = settingsToJson (s);
+        Settings volta;
+        check (settingsFromJson (txt, volta), "configuracao com output volta do arquivo");
+        check (! volta.outputs.outputs.empty(), "o output foi gravado");
+        check (volta.outputs.outputs[0].pair == 2, "o par escolhido foi preservado");
+        check (volta.outputs.outputs[0].busSource == 0, "a origem escolhida foi preservada");
+    }
+
+    // -------- CUE: onde entra e quanto abaixa o que ja tocava
+    {
+        MixerEngine mix;
+        mix.prepare (48000.0, 512, 8);
+
+        auto& ch = mix.channel (0);
+        ch.params.on.store (true);
+        ch.params.faderDb.store (0.0f);
+        ch.params.busMask.store (1u);
+        ch.params.inputIndex.store (0);
+
+        mix.monitor.phonesDb.store (0.0f);
+        mix.monitor.cueDb.store (0.0f);
+        mix.monitor.cueToPhones.store (true);
+
+        const int n = 256;
+        std::vector<float> ent (size_t (n), 0.5f);
+        const float* in[1] = { ent.data() };
+        std::vector<float> a (size_t (n), 0.0f), b (size_t (n), 0.0f);
+        float* out[2] = { a.data(), b.data() };
+
+        for (int k = 0; k < 300; ++k) mix.process (in, 1, out, 2, n);
+        check (std::fabs (mix.phonesLeft()[10]) > 0.4f, "sem CUE o fone toca o programa");
+
+        // dim no fundo: o CUE substitui, que era o comportamento antigo
+        ch.params.cue.store (true);
+        mix.monitor.cueDimDb.store (-120.0f);
+        for (int k = 0; k < 300; ++k) mix.process (in, 1, out, 2, n);
+        const float substituindo = std::fabs (mix.phonesLeft()[10]);
+
+        // dim brando: o programa continua audivel POR BAIXO do CUE
+        mix.monitor.cueDimDb.store (-12.0f);
+        for (int k = 0; k < 300; ++k) mix.process (in, 1, out, 2, n);
+        check (std::fabs (mix.phonesLeft()[10]) > substituindo,
+               "com DIM brando o programa soma ao CUE");
+
+        // e o CUE pode entrar tambem no monitor
+        mix.monitor.monitorDb.store (0.0f);
+        mix.monitor.cueToMonitor.store (true);
+        for (int k = 0; k < 300; ++k) mix.process (in, 1, out, 2, n);
+        check (std::fabs (mix.monitorLeft()[10]) > 0.0f, "CUE entra no monitor quando pedido");
+    }
+
+    // -------- o fader da saida manda no CUE tambem
+    {
+        // O CUE era somado DEPOIS do ganho do monitor: com o DIM no mudo, o
+        // operador ficava sem controle nenhum sobre o que ouvia — o fader da
+        // direita nao mexia em nada enquanto o CUE tocava.
+        MixerEngine mix;
+        mix.prepare (48000.0, 512, 8);
+
+        auto& ch = mix.channel (0);
+        ch.params.on.store (true);
+        ch.params.faderDb.store (0.0f);
+        ch.params.busMask.store (1u);
+        ch.params.inputIndex.store (0);
+        ch.params.cue.store (true);
+
+        mix.monitor.cueDb.store (0.0f);
+        mix.monitor.cueToMonitor.store (true);
+        mix.monitor.cueDimDb.store (-120.0f);      // mudo: sobra so o CUE
+
+        const int n = 256;
+        std::vector<float> ent (size_t (n), 0.5f);
+        const float* in[1] = { ent.data() };
+        std::vector<float> a (size_t (n), 0.0f), b (size_t (n), 0.0f);
+        float* out[2] = { a.data(), b.data() };
+
+        mix.monitor.monitorDb.store (0.0f);
+        for (int k = 0; k < 400; ++k) mix.process (in, 1, out, 2, n);
+        const float cheio = std::fabs (mix.monitorLeft()[10]);
+
+        mix.monitor.monitorDb.store (-20.0f);
+        for (int k = 0; k < 400; ++k) mix.process (in, 1, out, 2, n);
+        const float baixo = std::fabs (mix.monitorLeft()[10]);
+
+        check (cheio > 0.1f, "ouvindo so o CUE, com o fader aberto");
+        check (baixo < cheio * 0.5f, "baixar o fader baixa tambem o CUE");
+    }
+
+    // -------- desligar uma fonte de rede desloca as seguintes
+    {
+        // O canal guarda um numero de POSICAO na lista de fontes de rede, e
+        // essa lista e remontada a cada rearranjo. Tirando uma fonte, as
+        // seguintes andam uma casa para tras — e um canal que guardou o numero
+        // antigo passa a tocar a fonte do vizinho. Foi assim que o Livewire de
+        // outra maquina apareceu no canal de um Livewire desligado.
+        SourceCatalog cat;
+        SourceDef a; a.name = "AXIA";     a.livewireChannel = 3100;
+        SourceDef b; b.name = "PC LOCAL"; b.livewireChannel = 3;
+        SourceDef c; c.name = "NOTE";     c.livewireChannel = 5;
+        cat.sources = { a, b, c };
+
+        // distribuicao inicial, na ordem do catalogo
+        int slot = 0;
+        for (auto& f : cat.sources) f.index = f.livewireChannel > 0 ? slot++ : -1;
+        const int slotDoNote = cat.sources[2].index;
+        check (slotDoNote == 2, "com tres fontes, NOTE fica na posicao 2");
+
+        // o operador desliga a fonte do PC LOCAL
+        cat.sources[1].livewireChannel = 0;
+        slot = 0;
+        for (auto& f : cat.sources) f.index = f.livewireChannel > 0 ? slot++ : -1;
+
+        check (cat.sources[1].index == -1, "PC LOCAL sai da lista de rede");
+        check (cat.sources[2].index != slotDoNote, "NOTE muda de posicao");
+        check (cat.sources[2].index == 1, "NOTE assume a posicao que era do PC LOCAL");
     }
 
 

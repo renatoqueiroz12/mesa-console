@@ -32,6 +32,10 @@ struct SourceDef
     /** Canal Livewire (1..32767). Vira multicast por conta: 239.192.y.z com
         canal = y*256+z. Zero significa que esta fonte nao usa Livewire. */
     int  livewireChannel = 0;
+    /** Nome da fonte como anunciado. Guardado junto do numero porque e o nome
+        que sobrevive: IP muda, canal pode ser remapeado, nome fica. Tambem
+        evita que a lista mostre "(fora da lista)" antes da primeira varredura. */
+    std::string livewireNome;
     int  livewireSide = 0;               // 0 = esquerdo, 1 = direito, 2 = soma
 
     /** GPIO: qual porta e pino do no acompanham o ON/OFF deste canal.
@@ -39,6 +43,11 @@ struct SourceDef
     int  gpoPorta = 0, gpoPino = 0;
     /** Entrada que liga e desliga o canal de fora — botao de mesa, pedal. */
     int  gpiPorta = 0, gpiPino = 0;
+
+    /** Transcrever a fala deste input. */
+    bool transcrever = false;
+    float falaThresholdDb = -42.0f;
+    float falaMaxTrechoMs = 12000.0f;
     int  type = int (SourceType::Line);  // define mute de monitor e mix-minus
 
     float trimDb = 0.0f;
@@ -131,6 +140,9 @@ inline void loadSource (const SourceDef& s, Channel& ch)
     ch.params.feedSource    .store (s.feedSource);
     ch.params.feedOutputPair.store (s.feedOutputPair);
     ch.params.feedDimDb     .store (s.feedDimDb);
+    ch.params.fala.enabled    .store (s.transcrever);
+    ch.params.fala.thresholdDb.store (s.falaThresholdDb);
+    ch.params.fala.maxTrechoMs.store (s.falaMaxTrechoMs);
 }
 
 /** Le de volta do fader para a fonte: serve para "salvar ajustes na fonte"
@@ -163,6 +175,9 @@ inline void captureSource (const Channel& ch, SourceDef& s)
     s.feedSource     = ch.params.feedSource    .load();
     s.feedOutputPair = ch.params.feedOutputPair.load();
     s.feedDimDb      = ch.params.feedDimDb     .load();
+    s.transcrever    = ch.params.fala.enabled    .load();
+    s.falaThresholdDb= ch.params.fala.thresholdDb.load();
+    s.falaMaxTrechoMs= ch.params.fala.maxTrechoMs.load();
 }
 
 // ------------------------------------------------------------------ saidas
@@ -273,11 +288,15 @@ inline json::Value sourceToJson (const SourceDef& s)
     o.set ("device",         json::text    (s.deviceName));
     o.set ("deviceType",     json::text    (s.deviceType));
     o.set ("lwChannel",      json::num     (s.livewireChannel));
+    o.set ("lwNome",         json::text    (s.livewireNome));
     o.set ("lwSide",         json::num     (s.livewireSide));
     o.set ("gpoPorta",       json::num     (s.gpoPorta));
     o.set ("gpoPino",        json::num     (s.gpoPino));
     o.set ("gpiPorta",       json::num     (s.gpiPorta));
     o.set ("gpiPino",        json::num     (s.gpiPino));
+    o.set ("transcrever",    json::boolean (s.transcrever));
+    o.set ("falaThresholdDb", json::num     (s.falaThresholdDb));
+    o.set ("falaMaxMs",       json::num     (s.falaMaxTrechoMs));
     o.set ("deviceChannel",  json::num     (s.deviceChannel));
     o.set ("type",           json::num     (s.type));
     o.set ("trimDb",         json::num     (s.trimDb));
@@ -312,11 +331,15 @@ inline SourceDef sourceFromJson (const json::Value& o)
     s.deviceName     = o.string  ("device");
     s.deviceType     = o.string  ("deviceType");
     s.livewireChannel = int (o.number ("lwChannel", 0));
+    s.livewireNome    = o.string ("lwNome");
     s.livewireSide    = int (o.number ("lwSide", 0));
     s.gpoPorta        = int (o.number ("gpoPorta", 0));
     s.gpoPino         = int (o.number ("gpoPino", 0));
     s.gpiPorta        = int (o.number ("gpiPorta", 0));
     s.gpiPino         = int (o.number ("gpiPino", 0));
+    s.transcrever     = o.boolean ("transcrever", false);
+    s.falaThresholdDb = float (o.number ("falaThresholdDb", -42.0));
+    s.falaMaxTrechoMs = float (o.number ("falaMaxMs", 12000.0));
     s.deviceChannel  = int (o.number ("deviceChannel", 0));
     s.type           = int (o.number ("type", double (int (SourceType::Line))));
     s.trimDb         = float (o.number ("trimDb", 0.0));

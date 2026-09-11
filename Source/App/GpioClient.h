@@ -1,4 +1,5 @@
 #pragma once
+#include "../Core/NomeDaThread.h"
 #include <juce_core/juce_core.h>
 #include <atomic>
 #include <functional>
@@ -101,6 +102,9 @@ public:
 private:
     void loop()
     {
+        // se cair, o log da queda diz o nome em vez de "(sem nome)"
+        mesa::batizaThread ("gpio");
+
         while (! sair.load())
         {
             {

@@ -576,6 +576,20 @@ private:
         diagLabel->setJustificationType (juce::Justification::topLeft);
         p->addWide (diagLabel, 90);
 
+        p->addTitle ("Gravador de diagnostico");
+        p->addNote ("Grava a ENTRADA CRUA deste canal — taxa da placa, sem filtro, sem "
+                    "conversao, sem normalizacao. Serve para descobrir ONDE o audio se "
+                    "estraga: se o arquivo sai limpo, o problema esta depois deste ponto.");
+
+        gravarBtn = new juce::TextButton (aoConsultarGravacao && aoConsultarGravacao()
+                                              ? "PARAR GRAVACAO" : "GRAVAR ESTE CANAL");
+        gravarBtn->onClick = [this]
+        {
+            if (aoGravar) aoGravar (index);
+            rebuildTabs();
+        };
+        p->addWide (gravarBtn, 32);
+
         p->addTitle ("Calibrador de threshold");
         p->addNote ("Deixe o canal aberto, peca silencio por alguns segundos e depois "
                     "fala normal. O calibrador mede os dois e sugere o meio.");
@@ -670,6 +684,14 @@ private:
     juce::Label* diagLabel = nullptr;
     juce::Label* calLabel = nullptr;
     juce::Label* trigLabel = nullptr;
+    juce::TextButton* gravarBtn = nullptr;
+
+public:
+    /** Ligados pela superficie: o gravador vive la, junto do motor. */
+    std::function<void (int)> aoGravar;
+    std::function<bool()> aoConsultarGravacao;
+
+private:
     std::vector<VmixClient::Input> vmixInputs;
     juce::String vmixStatus;
 
