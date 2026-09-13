@@ -1424,11 +1424,66 @@ private:
             nameBox->onTextChange = [nameBox, &out] { out.name = nameBox->getText().toStdString(); };
             p->addRow ("Nome", nameBox);
 
+            // "O que sai": os oito barramentos e, no fim, DIRECT OUT.
+            //
+            // Estavam em dois campos, e a tela ficava confusa: nada dizia que o
+            // Direct out ANULA o barramento escolhido acima. Sendo a nona
+            // opcao da mesma lista, escolher um exclui o outro sozinho.
             auto* busBox = new juce::ComboBox();
             for (int k = 0; k < 8; ++k) busBox->addItem (busNames[k], k + 1);
-            busBox->setSelectedId (out.busSource + 1, juce::dontSendNotification);
-            busBox->onChange = [busBox, &out] { out.busSource = busBox->getSelectedId() - 1; };
+            busBox->addItem ("Direct out (uma entrada)", 9);
+            busBox->setSelectedId (out.directSource.empty()
+                                       ? juce::jlimit (0, 7, out.busSource) + 1 : 9,
+                                   juce::dontSendNotification);
+            busBox->onChange = [this, busBox, &out]
+            {
+                const int id = busBox->getSelectedId();
+                if (id == 9)
+                {
+                    // entra no direct out ja com a primeira entrada do catalogo:
+                    // campo vazio aqui significaria "desligado", e a lista
+                    // voltaria sozinha para o barramento
+                    if (out.directSource.empty() && ! settings.catalog.sources.empty())
+                        out.directSource = settings.catalog.sources.front().name;
+                }
+                else
+                {
+                    out.busSource = id - 1;
+                    out.directSource.clear();
+                }
+                rebuildTabs();
+            };
             p->addRow ("O que sai", busBox);
+
+            if (! out.directSource.empty())
+            {
+                auto* fonteBox = new juce::ComboBox();
+                int sel = 0;
+                for (size_t k = 0; k < settings.catalog.sources.size(); ++k)
+                {
+                    const auto& src = settings.catalog.sources[k];
+                    fonteBox->addItem (juce::String (src.name), int (k) + 1);
+                    if (src.name == out.directSource) sel = int (k) + 1;
+                }
+                if (settings.catalog.sources.empty())
+                    fonteBox->addItem ("(nenhuma entrada no catalogo)", 1);
+
+                fonteBox->setSelectedId (sel > 0 ? sel : 1, juce::dontSendNotification);
+                fonteBox->onChange = [this, fonteBox, &out]
+                {
+                    const int k = fonteBox->getSelectedId() - 1;
+                    if (k >= 0 && k < int (settings.catalog.sources.size()))
+                        out.directSource = settings.catalog.sources[size_t (k)].name;
+                };
+                p->addRow ("Qual entrada", fonteBox);
+                p->addNote ("Manda esta ENTRADA direto para o destino, sem passar por fader "
+                            "nem por mistura. Sai como chegou no conector: antes de trim, DSP, "
+                            "fader e ON/OFF, e vale mesmo que nenhum fader tenha esta fonte "
+                            "carregada. Serve para gravar cada microfone em separado, alimentar "
+                            "processador externo, ou repassar uma fonte adiante pela rede: entra "
+                            "Livewire numa entrada e sai Livewire noutro canal. O sinal e mono e "
+                            "vai igual nos dois lados.");
+            }
 
             const Transport t = outputTransport (oi, out);
 

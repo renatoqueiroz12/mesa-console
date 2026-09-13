@@ -3,3 +3,8 @@ build/
 settings.json
 scene.json
 
+
+build/
+build-asan/
+*.pdb
+*.exe

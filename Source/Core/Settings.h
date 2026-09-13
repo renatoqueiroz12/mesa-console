@@ -22,7 +22,6 @@ struct DeviceSettings
     int    bufferSize = 128;
     int    numInputs  = 16;
     int    numOutputs = 8;
-    int    channelCount = 12;            // strips criados
 };
 
 struct RoutingSettings
@@ -409,7 +408,6 @@ inline std::string settingsToJson (const Settings& s)
     d.set ("bufferSize",   num (s.device.bufferSize));
     d.set ("numInputs",    num (s.device.numInputs));
     d.set ("numOutputs",   num (s.device.numOutputs));
-    d.set ("channelCount", num (s.device.channelCount));
     root.set ("device", d);
 
     auto r = object();
@@ -583,7 +581,6 @@ inline bool settingsFromJson (const std::string& src, Settings& out)
         out.device.bufferSize   = int (d->number ("bufferSize", 128));
         out.device.numInputs    = int (d->number ("numInputs", 16));
         out.device.numOutputs   = int (d->number ("numOutputs", 8));
-        out.device.channelCount = int (d->number ("channelCount", 12));
     }
     if (auto* r = root.find ("routing"))
     {

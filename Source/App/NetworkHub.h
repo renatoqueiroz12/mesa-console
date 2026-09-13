@@ -255,8 +255,23 @@ public:
 
     /** Liga cada OutputDef de rede a um destino do motor. Mesma logica dos
         inputs, do outro lado: par de filas por destino. */
-    void rebindOutputs (mesa::OutputCatalog& outputs, double sampleRate, int blockSize)
+    void rebindOutputs (mesa::OutputCatalog& outputs, const mesa::SourceCatalog& catalog,
+                        double sampleRate, int blockSize)
     {
+        /** Nome da fonte -> o par (kind, index) que o motor entende.
+
+            Tem de rodar DEPOIS do rebind das entradas, que e quem atribui o
+            index das fontes de rede. Fonte que nao existe mais no catalogo
+            devolve -1: o destino cai no barramento em vez de mandar o audio de
+            outra fonte que por acaso ficou naquele slot. */
+        auto achaFonte = [&catalog] (const std::string& nome, int& kind, int& idx)
+        {
+            kind = 0; idx = -1;
+            if (nome.empty()) return;
+            for (const auto& s : catalog.sources)
+                if (s.name == nome) { kind = s.kind; idx = s.index; return; }
+        };
+
         int slot = 0;
         for (auto& o : outputs.outputs)
         {
@@ -270,6 +285,9 @@ public:
                                || o.livewireChannel > 0
                                || ! o.streamName.empty();
             if (! ehDeRede) continue;
+
+            int dKind = 0, dIdx = -1;
+            achaFonte (o.directSource, dKind, dIdx);
             if (slot >= AudioEngine::kMaxNetSinks) break;
             // transmissao Livewire: a mesa vira fonte na rede Axia
             if (o.livewireChannel > 0)
@@ -299,7 +317,7 @@ public:
                     it = lwOut.emplace (o.livewireChannel, std::move (saida)).first;
                 }
                 engine.setNetSink (slot, it->second.left.get(), it->second.right.get(),
-                                   o.busSource);
+                                   o.busSource, dKind, dIdx);
                 ++slot;
                 continue;
             }
@@ -312,7 +330,8 @@ public:
             if (dev == nullptr) continue;
 
             const int base = o.pair * 2;
-            engine.setNetSink (slot, dev->sink (base), dev->sink (base + 1), o.busSource);
+            engine.setNetSink (slot, dev->sink (base), dev->sink (base + 1), o.busSource,
+                               dKind, dIdx);
             ++slot;
         }
         for (int i = slot; i < AudioEngine::kMaxNetSinks; ++i)

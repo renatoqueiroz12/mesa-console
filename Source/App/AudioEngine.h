@@ -182,8 +182,34 @@ public:
             if (l == nullptr) continue;
             auto* r = sk.right.load (std::memory_order_relaxed);
 
-            const int b = sk.busSource.load (std::memory_order_relaxed);
             const float* srcL = nullptr; const float* srcR = nullptr;
+
+            // DIRECT OUT tem precedencia sobre o barramento: quem apontou uma
+            // entrada quer aquela entrada, nao a mistura. Cru e mono nos dois
+            // lados - ver a nota em OutputDef::directSource.
+            const int fi = sk.fonteIndex.load (std::memory_order_relaxed);
+            if (fi >= 0)
+            {
+                if (sk.fonteKind.load (std::memory_order_relaxed)
+                        == int (mesa::InputKind::Network))
+                {
+                    if (fi < numNet) srcL = netPtr[size_t (fi)];
+                }
+                else if (inputChannelData != nullptr && fi < numInputChannels)
+                {
+                    srcL = inputChannelData[fi];
+                }
+
+                srcR = srcL;
+                if (srcL != nullptr)
+                {
+                    l->push (srcL, numSamples);
+                    if (r != nullptr) r->push (srcR, numSamples);
+                }
+                continue;
+            }
+
+            const int b = sk.busSource.load (std::memory_order_relaxed);
             switch (b)
             {
                 case 0: case 1: case 2: case 3:
@@ -293,15 +319,27 @@ public:
         std::atomic<mesa::AsyncSource*> left  { nullptr };
         std::atomic<mesa::AsyncSource*> right { nullptr };
         std::atomic<int> busSource { 0 };
+        /** Direct out: de que ENTRADA sai. -1 = usa o barramento. */
+        std::atomic<int> fonteKind  { 0 };
+        std::atomic<int> fonteIndex { -1 };
     };
 
     static constexpr int kMaxNetSinks = 16;
     std::array<NetSink, kMaxNetSinks> netSink {};
 
-    void setNetSink (int i, mesa::AsyncSource* l, mesa::AsyncSource* r, int bus) noexcept
+    /** DIRECT OUT por ENTRADA. O par (kind, index) e o mesmo que um canal usa
+        para achar sua fonte: placa principal ou fila de rede. Quem resolve o
+        nome da fonte para este par e o NetworkHub, fora do callback.
+
+        @param fonteKind   0 = placa principal, 1 = fila de rede
+        @param fonteIndex  -1 = sem direct out; o destino segue o barramento. */
+    void setNetSink (int i, mesa::AsyncSource* l, mesa::AsyncSource* r, int bus,
+                     int fonteKind = 0, int fonteIndex = -1) noexcept
     {
         if (i < 0 || i >= kMaxNetSinks) return;
-        netSink[size_t (i)].busSource.store (bus, std::memory_order_relaxed);
+        netSink[size_t (i)].busSource .store (bus, std::memory_order_relaxed);
+        netSink[size_t (i)].fonteKind .store (fonteKind, std::memory_order_relaxed);
+        netSink[size_t (i)].fonteIndex.store (fonteIndex, std::memory_order_relaxed);
         netSink[size_t (i)].left .store (l, std::memory_order_relaxed);
         netSink[size_t (i)].right.store (r, std::memory_order_relaxed);
     }

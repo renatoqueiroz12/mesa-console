@@ -142,7 +142,9 @@ private:
             // programa.
             setUsingNativeTitleBar (false);
             setTitleBarHeight (0);
-            setContentOwned (new MainComponent (12), true);   // 12 faders
+            // a superficie diz de quantos canais precisa: 8 por camada, duas
+            // camadas. Numero fixo aqui ja deixou o layer B pela metade.
+            setContentOwned (new MainComponent (MainComponent::kCanaisNecessarios), true);
             setResizable (true, false);
             centreWithSize (getWidth(), getHeight());
             setVisible (true);

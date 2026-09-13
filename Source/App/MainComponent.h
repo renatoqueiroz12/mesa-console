@@ -39,6 +39,16 @@ class MainComponent : public juce::Component, private juce::Timer
 {
 public:
     static constexpr int kFadersPerLayer = 8;
+    static constexpr int kLayers         = 2;
+
+    /** Quantos canais a superficie precisa para encher TODAS as camadas.
+
+        Nasceu de um defeito: o mixer era criado com 12 canais fixos no
+        Main.cpp, enquanto a superficie mostra 8 por camada em duas camadas. O
+        layer A ficava completo e o B com quatro tiras, cada uma do dobro da
+        largura, parecendo outra mesa. Quem conta agora e a superficie, que e
+        quem sabe de quantos precisa. */
+    static constexpr int kCanaisNecessarios = kFadersPerLayer * kLayers;
 
     explicit MainComponent (int numChannels) : engine (numChannels), bridge (engine.mixer)
     {
@@ -1268,7 +1278,7 @@ private:
         const double sr = engine.sampleRate.load();
         const int    bl = juce::jmax (32, engine.blockSize.load());
         hub->rebind        (settings.catalog, sr, bl);
-        hub->rebindOutputs (settings.outputs, sr, bl);
+        hub->rebindOutputs (settings.outputs, settings.catalog, sr, bl);
 
         // DEPOIS de os transmissores existirem.
         //

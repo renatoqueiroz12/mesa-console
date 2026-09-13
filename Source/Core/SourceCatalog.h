@@ -195,6 +195,26 @@ struct OutputDef
     /** Canal Livewire que a mesa TRANSMITE. Zero = nao transmite. */
     int  livewireChannel = 0;
     int  busSource = 0;                  // 0..3 = PGM 1..4, 4 = CUE, 5 = monitor, 6 = fone
+
+    /** DIRECT OUT: manda uma ENTRADA direto para este destino, sem passar por
+        fader nem por barramento. Vazio = desligado, e o destino segue o
+        busSource.
+
+        Guarda o NOME da fonte no catalogo, nao o indice: indice de fonte de
+        rede e reatribuido a cada religamento, e destino que troca de fonte
+        sozinho manda audio errado ao ar.
+
+        E de ENTRADA, nao de fader, de proposito. O direct out de uma mesa sai
+        do conector e existe mesmo que nenhum fader tenha aquela fonte
+        carregada. Serve para gravar cada microfone em separado, alimentar
+        processador externo, ou repassar uma fonte adiante pela rede: entra
+        Livewire numa entrada e sai Livewire noutro canal, direto.
+
+        O sinal e cru (antes de trim, DSP, fader e ON/OFF) e MONO, que e a
+        natureza de uma entrada aqui. Em destino estereo vai igual nos dois
+        lados, sem pan: pan e coisa de mistura, e direct out existe justamente
+        para escapar dela. */
+    std::string directSource;
     /** Ganho DESTA saida, em dB.
 
         Cada destino casa com um equipamento diferente: o transmissor quer um
@@ -400,6 +420,7 @@ inline json::Value outputsToJson (const OutputCatalog& c)
         v.set ("deviceType", json::text (o.deviceType));
         v.set ("lwChannel", json::num (o.livewireChannel));
         v.set ("bus",    json::num  (o.busSource));
+        v.set ("directSource", json::text (o.directSource));
         a.arr.push_back (v);
     }
     return a;
@@ -422,6 +443,7 @@ inline void outputsFromJson (const json::Value& a, OutputCatalog& c)
         o.deviceType = v.string ("deviceType");
         o.livewireChannel = int (v.number ("lwChannel", 0));
         o.busSource  = int (v.number ("bus", 0));
+        o.directSource  = v.string ("directSource");
         c.outputs.push_back (o);
     }
 }

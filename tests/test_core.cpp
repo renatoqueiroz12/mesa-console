@@ -1651,6 +1651,61 @@ int main()
     }
 
 
+    // -------- direct out: saida apontada para uma ENTRADA, nao para um bus
+    {
+        using namespace mesa;
+        OutputCatalog c;
+        OutputDef a; a.name = "REPASSE"; a.livewireChannel = 3601;
+        a.directSource = "MIC 1 APRES";
+        OutputDef b; b.name = "PGM 1"; b.busSource = 0;
+        c.outputs = { a, b };
+
+        std::string texto; json::write (outputsToJson (c), texto);
+        json::Value v;
+        check (json::parse (texto, v), "saidas gravadas dao JSON valido");
+
+        OutputCatalog volta; outputsFromJson (v, volta);
+        check (volta.outputs.size() == 2, "as duas saidas voltam da gravacao");
+        check (volta.outputs[0].directSource == "MIC 1 APRES", "direct out guarda o NOME da fonte");
+        check (volta.outputs[0].livewireChannel == 3601, "o canal Livewire continua la");
+        check (volta.outputs[1].directSource.empty(), "saida de barramento fica sem direct out");
+
+        // settings.json de versao anterior nao pode nascer com direct out: um
+        // destino que troca de fonte sozinho numa atualizacao vai ao ar errado
+        json::Value velho;
+        json::parse ("[{\"name\":\"ANTIGA\",\"bus\":1}]", velho);
+        OutputCatalog antiga; outputsFromJson (velho, antiga);
+        check (antiga.outputs.size() == 1 && antiga.outputs[0].directSource.empty(),
+               "configuracao antiga continua sem direct out");
+
+        // o nome e o que sobrevive: indice de fonte de rede e reatribuido a
+        // cada religamento, e apontar por indice mandaria outra fonte ao ar
+        SourceCatalog cat;
+        SourceDef s1; s1.name = "PLAYOUT A"; s1.kind = int (InputKind::Network); s1.index = 0;
+        SourceDef s2; s2.name = "MIC 1 APRES"; s2.kind = int (InputKind::Network); s2.index = 1;
+        cat.sources = { s1, s2 };
+
+        auto acha = [&cat] (const std::string& nome, int& kind, int& idx)
+        {
+            kind = 0; idx = -1;
+            if (nome.empty()) return;
+            for (const auto& s : cat.sources)
+                if (s.name == nome) { kind = s.kind; idx = s.index; return; }
+        };
+
+        int k = 0, i = -1;
+        acha ("MIC 1 APRES", k, i);
+        check (k == int (InputKind::Network) && i == 1, "acha a fonte pelo nome");
+
+        cat.sources = { s2, s1 };                    // religou, ordem trocada
+        cat.sources[0].index = 0; cat.sources[1].index = 1;
+        acha ("MIC 1 APRES", k, i);
+        check (i == 0, "fonte remanejada continua sendo a mesma pelo nome");
+
+        acha ("FONTE QUE SUMIU", k, i);
+        check (i == -1, "fonte apagada devolve -1, e o destino cai no barramento");
+    }
+
     std::printf ("\n%s\n", failures == 0 ? "TODOS OS TESTES PASSARAM" : "HOUVE FALHAS");
     return failures;
 }
