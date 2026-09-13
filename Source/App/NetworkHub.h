@@ -4,6 +4,7 @@
 #include "SecondaryDevices.h"
 #include "LivewireReceiver.h"
 #include "LivewireSender.h"
+#include "LivewireAdvertiser.h"
 #include "../Core/SourceCatalog.h"
 #include <map>
 #include <memory>
@@ -24,7 +25,107 @@ public:
     NetworkHub (AudioEngine& e, SecondaryDevices& sec) : engine (e), secondaries (sec) {}
 
     /** IP da placa por onde falar Livewire. Vazio = escolha do Windows. */
-    void setPlacaLivewire (const juce::String& ip) { placaLw = ip; }
+    void setPlacaLivewire (const juce::String& ip)
+    {
+        if (ip == placaLw) return;
+
+        // A PLACA MUDOU: refaz os dois lados.
+        //
+        // Receptor e transmissor pedem a interface ao ABRIR. Trocar a escolha
+        // depois nao alcanca quem ja esta de pe — o novo valor ficava guardado
+        // e o socket seguia na placa antiga. O sintoma engana: a tela mostra a
+        // placa certa e o audio continua indo para a errada.
+        placaLw = ip;
+        fechaLivewire();
+        anunciante.stop();
+        anuncioLigado = false;
+    }
+
+    /** Anuncia na rede os canais que a mesa transmite.
+
+        Sem isto o QOR recebe o audio e marca "Used EW": ele quer alterar o
+        anuncio para registrar que assumiu a fonte, nao acha anuncio nenhum, e
+        nao sabe distinguir isso de outro motor ja ter pegado o stream. */
+    void permiteAnuncio (bool v)
+    {
+        if (v == anuncioPermitido) return;
+        anuncioPermitido = v;
+        if (! v) { anunciante.stop(); anuncioLigado = false; }
+    }
+
+    /** HWID e porta de controle do anuncio. Mudar exige refazer os sockets —
+        o anunciante pede a porta ao abrir, como o receptor pede a placa. */
+    void setIdentidadeAnuncio (int hwid, int udpc)
+    {
+        if (hwid == hwidAnuncio && udpc == udpcAnuncio) return;
+        hwidAnuncio = hwid;
+        udpcAnuncio = udpc;
+        anunciante.stop();
+        anuncioLigado = false;
+    }
+
+    void atualizaAnuncio (const juce::String& nomeDaMaquina)
+    {
+        if (! anuncioPermitido)
+        {
+            anunciante.stop();
+            anuncioLigado = false;
+            return;
+        }
+
+        std::vector<LivewireAdvertiser::Fonte> lista;
+        for (auto& kv : lwOut)
+            if (kv.second.sender != nullptr)
+            {
+                const auto nome = nomesDeSaida.count (kv.first) ? nomesDeSaida[kv.first]
+                                                                : juce::String ("MESA");
+                lista.push_back ({ kv.first, nome.toStdString(), 0 });
+            }
+
+        if (lista.empty())
+        {
+            registra ("anuncio: nenhum canal para anunciar ("
+                      + juce::String (int (lwOut.size())) + " saidas Livewire)");
+            anunciante.stop();
+            anuncioLigado = false;
+            return;
+        }
+
+        anunciante.setFontes (lista);
+
+        // Estado proprio, e nao o contador de enviados.
+        //
+        // Antes a condicao era "enviados == 0", que se contradiz: o contador
+        // zera a cada start, entao ou ele tentava religar para sempre, ou —
+        // dando certo uma vez — nunca mais religava ao trocar de placa. Um
+        // sinalizador explicito diz o que se quer saber.
+        if (placaLw.isEmpty())
+            registra ("anuncio: sem placa de rede escolhida — nao da para anunciar");
+
+        if (! anuncioLigado && placaLw.isNotEmpty())
+        {
+            anuncioLigado = anunciante.start (placaLw, nomeDaMaquina,
+                                              hwidAnuncio, udpcAnuncio);
+            registra (anuncioLigado
+                          ? "anunciando " + juce::String (int (lista.size()))
+                                + " canal(is) na rede pela placa " + placaLw
+                          : "NAO consegui anunciar na rede pela placa " + placaLw);
+        }
+    }
+
+    int anunciosEnviados()  const noexcept { return anunciante.enviados(); }
+    /** Quanto o console ja respondeu ao nosso anuncio. Zero e diagnostico. */
+    int anunciosRecebidos() const noexcept { return anunciante.recebidos(); }
+    unsigned hwidDoAnuncio() const noexcept { return anunciante.hwid(); }
+
+    /** Tipo de carga RTP usado ao transmitir. */
+    void setTipoDeCarga (int v)
+    {
+        cargaTx = v;
+        for (auto& kv : lwOut)
+            if (kv.second.sender != nullptr)
+                kv.second.sender->tipoDeCarga.store (v);
+    }
 
     /** Para a superficie registrar no log o que a rede esta fazendo.
 
@@ -61,7 +162,7 @@ public:
         juce::String t;
         for (const auto& kv : livewire)
             t << "  |  LW " << kv.first << " " << juce::String (kv.second.receiver->packets())
-              << " pacotes";
+              << " pacotes carga " << juce::String (kv.second.receiver->cargaRecebida());
         for (const auto& kv : lwOut)
             t << "  |  LW saida " << kv.first << " "
               << juce::String (kv.second.sender->packets()) << " pacotes";
@@ -159,7 +260,16 @@ public:
         int slot = 0;
         for (auto& o : outputs.outputs)
         {
-            if (o.kind != int (mesa::InputKind::Network)) continue;
+            // Quem manda e o campo preenchido, nao a marca.
+            //
+            // Mesmo defeito que os inputs tinham: um output criado como placa
+            // e depois apontado para um canal Livewire mantinha a marca antiga
+            // e era descartado aqui. O transmissor nunca nascia — e sem
+            // transmissor, o anunciante nao tem o que anunciar.
+            const bool ehDeRede = o.kind == int (mesa::InputKind::Network)
+                               || o.livewireChannel > 0
+                               || ! o.streamName.empty();
+            if (! ehDeRede) continue;
             if (slot >= AudioEngine::kMaxNetSinks) break;
             // transmissao Livewire: a mesa vira fonte na rede Axia
             if (o.livewireChannel > 0)
@@ -179,6 +289,8 @@ public:
                     saida.left ->prepare (blocoLw, 8, sampleRate, 0.35);
                     saida.right->prepare (blocoLw, 8, sampleRate, 0.35);
                     saida.sender = std::make_unique<LivewireSender> (*saida.left, *saida.right);
+                    saida.sender->tipoDeCarga.store (cargaTx);
+                    nomesDeSaida[o.livewireChannel] = juce::String (o.name);
                     if (! saida.sender->start (o.livewireChannel, sampleRate, placaLw))
                     {
                         lastLivewireError = saida.sender->error();
@@ -279,6 +391,13 @@ private:
     void registra (const juce::String& m) { if (aoRegistrar) aoRegistrar (m); }
 
     juce::String lastLivewireError, placaLw;
+    int cargaTx = 96;
+    LivewireAdvertiser anunciante;
+    bool anuncioLigado = false;
+    bool anuncioPermitido = false;
+    int  hwidAnuncio = 0;
+    int  udpcAnuncio = 4002;
+    std::map<int, juce::String> nomesDeSaida;
 
     struct NdiSlot
     {

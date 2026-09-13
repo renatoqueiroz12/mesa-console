@@ -21,6 +21,26 @@ public:
         qualquer escolha anterior e abre o dispositivo padrao do Windows. Era
         por isso que so a placa nao persistia: todo o resto ia para o JSON, mas
         o dispositivo era redecidido do zero a cada abertura. */
+    /** Nome da placa que a configuracao pedia e nao existe aqui. Vazio = tudo
+        certo. A superficie mostra isso, porque silencio inexplicado e pior
+        que aviso. */
+    juce::String placaSalvaAusente;
+
+    /** A placa nomeada no estado salvo esta disponivel nesta maquina? */
+    bool placaSalvaExiste (const juce::XmlElement& xml)
+    {
+        const auto nome = xml.getStringAttribute ("audioDeviceName");
+        if (nome.isEmpty()) return true;          // sem nome, deixa tentar
+
+        for (auto* tipo : deviceManager.getAvailableDeviceTypes())
+        {
+            tipo->scanForDevices();
+            if (tipo->getDeviceNames (false).contains (nome)) return true;
+            if (tipo->getDeviceNames (true) .contains (nome)) return true;
+        }
+        return false;
+    }
+
     juce::String start (int inputs, int outputs, const juce::String& estadoSalvo = {})
     {
         deviceManager.addAudioCallback (this);
@@ -29,18 +49,43 @@ public:
         {
             if (auto xml = juce::XmlDocument::parse (estadoSalvo))
             {
-                const auto err = deviceManager.initialise (inputs, outputs, xml.get(), true);
-                if (err.isEmpty() && deviceManager.getCurrentAudioDevice() != nullptr)
-                    return {};
-                // se a placa salva sumiu, cai no caminho padrao abaixo em vez
-                // de deixar a mesa muda
+                // A placa salva EXISTE nesta maquina?
+                //
+                // Confiar no erro devolvido nao basta: o driver de uma placa
+                // ausente pode quebrar dentro da abertura, antes de devolver
+                // qualquer coisa — e a mesa morre no arranque sem chegar a
+                // escrever no log. Foi o que aconteceu ao trazer a
+                // configuracao de outra maquina, que nomeava uma placa que
+                // nao esta aqui.
+                //
+                // Perguntar antes custa uma varredura de nomes e transforma
+                // "nao abre" em "abriu na placa padrao".
+                if (placaSalvaExiste (*xml))
+                {
+                    const auto err = deviceManager.initialise (inputs, outputs, xml.get(), true);
+                    if (err.isEmpty() && deviceManager.getCurrentAudioDevice() != nullptr)
+                        return {};
+                }
+                else
+                {
+                    placaSalvaAusente = xml->getStringAttribute ("audioDeviceName");
+                }
             }
         }
 
-        for (auto* type : deviceManager.getAvailableDeviceTypes())
-            if (type->getTypeName() == "ASIO")
-                deviceManager.setCurrentAudioDeviceType ("ASIO", true);
-
+        // NAO ABRIMOS ASIO NO ESCURO.
+        //
+        // Antes a mesa forcava o tipo ASIO e abria o primeiro driver da lista.
+        // Parece sensato — ASIO e o caminho de menor latencia, que e o que uma
+        // mesa quer. Mas driver ASIO de placa AUSENTE quebra ao ser aberto, e
+        // quebra dentro do proprio driver, onde nenhum tratamento nosso
+        // alcanca: a mesa morre no arranque sem chegar a escrever no log.
+        // Basta alguem ter instalado uma interface e levado embora.
+        //
+        // Sem escolha salva, abrimos o audio do Windows, que sempre abre. O
+        // operador escolhe ASIO uma vez nas configuracoes e a escolha fica
+        // salva — a partir dai o caminho de baixa latencia e usado sempre, so
+        // que por decisao de alguem, nao por sorte da ordem da lista.
         auto err = deviceManager.initialiseWithDefaultDevices (inputs, outputs);
         if (err.isNotEmpty())
             return err;

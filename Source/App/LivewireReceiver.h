@@ -1,4 +1,8 @@
 #pragma once
+#if JUCE_WINDOWS
+ #include <winsock2.h>
+ #include <ws2tcpip.h>
+#endif
 #include "../Core/NomeDaThread.h"
 #include <juce_core/juce_core.h>
 #include "../Core/AsyncSource.h"
@@ -81,7 +85,17 @@ public:
             return false;
         }
 
-        if (! socket->joinMulticast (group))
+        // ENTRA NO GRUPO PELA PLACA ESCOLHIDA.
+        //
+        // O joinMulticast do JUCE nao aceita interface: ele deixa o sistema
+        // escolher pela tabela de rotas. Numa maquina com uma placa so isso
+        // funciona; nesta ha seis — duas Ethernet, Wi-Fi, Bluetooth e duas de
+        // conexao local — e o Windows entra pela errada. O receptor abre sem
+        // erro nenhum e nunca recebe um pacote.
+        //
+        // O painel da Axia pergunta "Livewire Network Card" exatamente por
+        // isso. Aqui fazemos o mesmo pedido, so que direto ao sistema.
+        if (! entraNoGrupoPelaPlaca (group, localIp) && ! socket->joinMulticast (group))
         {
             lastError = "nao consegui entrar no grupo " + group
                       + (localIp.isNotEmpty() ? " pela placa " + localIp
@@ -119,7 +133,36 @@ public:
     int  channel() const noexcept { return chan; }
     juce::String address() const { return group; }
     juce::String error() const { return lastError; }
+
+private:
+    /** Pede a entrada no grupo informando a INTERFACE, coisa que o JUCE nao
+        expoe. Devolve falso se nao deu — o caminho antigo continua como
+        reserva, para nao piorar o que ja funciona em maquina simples. */
+    bool entraNoGrupoPelaPlaca (const juce::String& grupo, const juce::String& placa)
+    {
+        if (placa.isEmpty() || socket == nullptr) return false;
+
+       #if JUCE_WINDOWS
+        struct ip_mreq req {};
+        req.imr_multiaddr.s_addr = ::inet_addr (grupo.toRawUTF8());
+        req.imr_interface.s_addr = ::inet_addr (placa.toRawUTF8());
+
+        const int fd = socket->getRawSocketHandle();
+        if (fd < 0) return false;
+
+        return ::setsockopt (SOCKET (fd), IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                             reinterpret_cast<const char*> (&req), sizeof (req)) == 0;
+       #else
+        juce::ignoreUnused (grupo, placa);
+        return false;
+       #endif
+    }
+
+public:
     juce::String placa() const { return placaUsada.isEmpty() ? "(escolhida pelo Windows)" : placaUsada; }
+    /** Tipo de carga RTP dos pacotes recebidos. -1 = nenhum ainda. */
+    int  cargaRecebida() const noexcept { return tipoDeCarga.load (std::memory_order_relaxed); }
+
     int  packets() const noexcept { return packetCount.load(); }
     bool receiving() const noexcept { return packetCount.load() > lastSeen; }
 
@@ -157,6 +200,14 @@ private:
             if ((p[0] & 0x10) != 0 && n > offset + 4)          // extensao presente
                 offset += 4 + 4 * ((p[offset + 2] << 8) | p[offset + 3]);
             if (n <= offset) continue;
+
+            // Tipo de carga do RTP, guardado para diagnostico.
+            //
+            // Nos ignoramos este campo ao receber — e funciona. Mas ao
+            // TRANSMITIR ele importa: o equipamento do outro lado pode recusar
+            // um numero que nao conhece. Saber qual o QOR usa e a forma de
+            // acertar o nosso sem adivinhar.
+            tipoDeCarga.store (int (p[1] & 0x7f), std::memory_order_relaxed);
 
             const int payload = n - offset;
             const int frames = payload / 6;                     // 2 canais x 3 bytes
@@ -202,6 +253,7 @@ private:
     std::thread worker;
     std::atomic<bool> quit { true };
     std::atomic<int> packetCount { 0 };
+    std::atomic<int> tipoDeCarga { -1 };
     int lastSeen = 0, chan = 0;
     juce::String group, lastError, placaUsada;
 

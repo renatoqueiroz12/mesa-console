@@ -1,4 +1,8 @@
 #pragma once
+#if JUCE_WINDOWS
+ #include <winsock2.h>
+ #include <ws2tcpip.h>
+#endif
 #include "../Core/NomeDaThread.h"
 #include <juce_core/juce_core.h>
 #include <atomic>
@@ -76,6 +80,22 @@ private:
     static constexpr int kPorta = 4001;
     static constexpr const char* kGrupo = "239.192.255.3";
 
+    bool entraNoGrupoPelaPlaca()
+    {
+        if (placa.isEmpty() || socket == nullptr) return false;
+       #if JUCE_WINDOWS
+        struct ip_mreq req {};
+        req.imr_multiaddr.s_addr = ::inet_addr (kGrupo);
+        req.imr_interface.s_addr = ::inet_addr (placa.toRawUTF8());
+        const int fd = socket->getRawSocketHandle();
+        if (fd < 0) return false;
+        return ::setsockopt (SOCKET (fd), IPPROTO_IP, IP_ADD_MEMBERSHIP,
+                             reinterpret_cast<const char*> (&req), sizeof (req)) == 0;
+       #else
+        return false;
+       #endif
+    }
+
     void loop()
     {
         mesa::batizaThread ("lw-anuncios");
@@ -86,7 +106,10 @@ private:
         // socket perde o que nasce na propria maquina
         if (! socket->bindToPort (kPorta)) { anota ("nao consegui abrir a porta 4001"); return; }
 
-        if (! socket->joinMulticast (kGrupo))
+        // pela placa escolhida, como no receptor de audio: sem isto o ouvinte
+        // entrava na rede que o Windows escolhesse, e capturava anuncios de
+        // outra rede enquanto os da rede certa passavam despercebidos
+        if (! entraNoGrupoPelaPlaca() && ! socket->joinMulticast (kGrupo))
         {
             anota (juce::String ("nao consegui entrar no grupo de anuncios ") + kGrupo
                    + (placa.isNotEmpty() ? " pela placa " + placa : juce::String())
@@ -181,7 +204,17 @@ private:
     void guardaAmostra (const char* dados, int n)
     {
         std::lock_guard<std::mutex> g (mutex);
-        if (cruas.size() >= 3) return;         // tres bastam para afinar
+
+        // Grava os anuncios INTEIROS num arquivo.
+        //
+        // Tres amostras cortadas em 96 bytes serviam para conferir se o
+        // formato batia. Para ESCREVER um anuncio que o QOR aceite, precisamos
+        // do exemplar completo de quem ele ja aceita — o driver da Axia nesta
+        // mesma rede. Copiar algo comprovado vale mais que interpretar
+        // documentacao de terceiro.
+        gravaParaEstudo (dados, n);
+
+        if (cruas.size() >= 3) return;
 
         juce::String linha;
         linha << n << " bytes: ";
@@ -189,6 +222,37 @@ private:
         for (int i = 0; i < juce::jmin (n, 96); ++i)
             linha << juce::String::toHexString (int (b[i])).paddedLeft ('0', 2) << " ";
         cruas.add (linha);
+    }
+
+    /** Guarda os primeiros anuncios completos, em hexadecimal, para analise. */
+    void gravaParaEstudo (const char* dados, int n)
+    {
+        if (gravados >= 40) return;            // o bastante para ver o padrao
+        ++gravados;
+
+        auto pasta = juce::File::getSpecialLocation (
+                         juce::File::userApplicationDataDirectory)
+                     .getChildFile ("MesaConsole");
+        pasta.createDirectory();
+
+        juce::String linha;
+        linha << "[" << gravados << "] " << n << " bytes\n";
+
+        const auto* b = reinterpret_cast<const unsigned char*> (dados);
+        for (int i = 0; i < n; ++i)
+        {
+            linha << juce::String::toHexString (int (b[i])).paddedLeft ('0', 2) << " ";
+            if ((i + 1) % 16 == 0) linha << "\n";
+        }
+        linha << "\n";
+
+        // e o mesmo trecho em texto legivel, onde os nomes aparecem
+        for (int i = 0; i < n; ++i)
+            linha << ((b[i] >= 32 && b[i] < 127) ? juce::String::charToString (
+                          juce::juce_wchar (b[i])) : juce::String ("."));
+        linha << "\n\n";
+
+        pasta.getChildFile ("anuncios.txt").appendText (linha, false, false, "\n");
     }
 
     void anota (const juce::String& e)
@@ -205,6 +269,7 @@ private:
     mutable std::mutex mutex;
     std::map<int, Fonte> achadas;
     juce::StringArray cruas;
+    int gravados = 0;
     juce::String ultimoErro;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LivewireBrowser)

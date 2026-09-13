@@ -1,6 +1,8 @@
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "Theme.h"
+#include "MenuLateral.h"
+#include "LinhaTabela.h"
 #include "../Core/Settings.h"
 #include "../Core/MixerEngine.h"
 #include "../Core/SourceCatalog.h"
@@ -145,13 +147,21 @@ public:
                      mesa::AutomationEngine& a, juce::AudioDeviceManager& dm,
                      juce::File file, SecondaryDevices* sec = nullptr)
         : settings (s), mix (m), autom (a), deviceManager (dm), settingsFile (std::move (file)),
-          secondaries (sec), tabs (juce::TabbedButtonBar::TabsAtTop)
+          secondaries (sec)
     {
-        addAndMakeVisible (tabs);
-        tabs.setOutline (0);
-        tabs.setColour (juce::TabbedComponent::backgroundColourId, theme::surface);
+        // MENU NA ESQUERDA, como no painel do QOR.
+        //
+        // Com as abas no topo, onze nomes competiam por uma faixa estreita e
+        // ninguem achava nada: o operador lia a linha inteira toda vez. Na
+        // vertical cabe o nome por extenso, a lista fica na ordem em que se
+        // configura uma mesa, e a pagina ocupa o resto da tela.
+        menu.aoEscolher = [this] (int i) { mostraPagina (i); };
+        addAndMakeVisible (menu);
+
+
 
         buildAllTabs();
+        mostraPagina (0);
 
         saveButton.setButtonText ("SALVAR E APLICAR");
         saveButton.onClick = [this] { save(); };
@@ -180,7 +190,9 @@ public:
         // a mesa sabe fazer — e que ele esquece de fazer.
         procuraLivewire();
 
-        setSize (760, 560);
+        // Janela maior: a tabela precisa de largura para as colunas respirarem, e
+        // a pagina de inputs e a que mais se usa.
+        setSize (1180, 680);
     }
 
     /** Avisa a superficie quando fecha, para religar as fontes de rede. */
@@ -213,7 +225,9 @@ public:
         versaoLabel.setBounds (bottom.removeFromLeft (200));
         bottom.removeFromLeft (8);
         statusLabel.setBounds (bottom);
-        tabs.setBounds (r);
+        // menu fixo a esquerda, pagina ocupa o resto
+        menu.setBounds (r.removeFromLeft (170));
+        for (auto* pg : paginas) if (pg != nullptr) pg->setBounds (r);
     }
 
 private:
@@ -353,9 +367,23 @@ private:
         return p.addRow (label, e);
     }
 
+    void addSecao (const juce::String& titulo) { menu.addSecao (titulo); }
+
     void addTab (const juce::String& name, CfgPage* page)
     {
-        tabs.addTab (name, theme::surfaceLo, new CfgScroller (page), true);
+        auto* sc = new CfgScroller (page);
+        paginas.add (sc);
+        addChildComponent (sc);
+        menu.addItem (name, paginas.size() - 1);
+    }
+
+    void mostraPagina (int i)
+    {
+        for (int k = 0; k < paginas.size(); ++k)
+            if (paginas[k] != nullptr) paginas[k]->setVisible (k == i);
+        menu.seleciona (i);
+        paginaAtual = i;
+        resized();
     }
 
     /** Redesenha as abas na hora. Sem isso, criar ou remover um canal parece
@@ -368,42 +396,60 @@ private:
         a posicao e devolvemos depois de montar. */
     void rebuildTabs()
     {
-        const int keep = tabs.getCurrentTabIndex();
+        const int keep = paginaAtual;
         const int ondeEstava = rolagemAtual();
 
-        tabs.clearTabs();
+        paginas.clear();
+        menu.limpa();
         buildAllTabs();
-        tabs.setCurrentTabIndex (juce::jlimit (0, tabs.getNumTabs() - 1, keep));
+        mostraPagina (juce::jlimit (0, paginas.size() - 1, keep));
 
         if (ondeEstava > 0)
             juce::MessageManager::callAsync ([this, ondeEstava]
             {
                 // depois do layout: antes dele a altura ainda e zero e a
                 // posicao seria descartada
-                if (auto* sc = dynamic_cast<CfgScroller*> (tabs.getCurrentContentComponent()))
+                if (auto* sc = paginaCorrente())
                     sc->vaiPara (ondeEstava);
             });
     }
 
     int rolagemAtual() const
     {
-        if (auto* sc = dynamic_cast<const CfgScroller*> (tabs.getCurrentContentComponent()))
+        if (auto* sc = paginaCorrente())
             return sc->posicaoDaRolagem();
         return 0;
     }
 
     void buildAllTabs()
     {
-        addTab ("Inputs",      buildCatalog());
-        addTab ("Outputs",     buildOutputsTab());
-        addTab ("Paginas",     buildPages());
-        addTab ("Rec",         buildRec());
-        addTab ("Monitoracao", buildMonitor());
-        addTab ("Rede",        buildNetwork());
-        addTab ("Automacao",   buildAutomation());
-        addTab ("DSP",         buildDsp());
-        addTab ("Usuarios",    buildUsers());
-        addTab ("Sistema",     buildSystem());
+        // Ordem de quem CONFIGURA uma mesa, e nao ordem de implementacao.
+        //
+        // Primeiro o que entra e sai — que e o grosso do trabalho e o que se
+        // volta a mexer toda semana. Depois o que se ajusta uma vez: como se
+        // escuta, como se grava, o que e automatico. Rede e sistema por
+        // ultimo, onde se mexe quando algo esta errado.
+        //
+        // Os prefixos agrupam visualmente sem precisar de submenu, que numa
+        // lista de dez itens seria mais clique para o mesmo resultado.
+        // Secoes com titulo, como o painel do QOR: o titulo nao clica, so
+        // agrupa. Dez nomes soltos numa lista viram procura; agrupados viram
+        // leitura.
+        addSecao ("IO Manager");
+        addTab ("Inputs",        buildCatalog());
+        addTab ("Outputs",       buildOutputsTab());
+        addTab ("Paginas",       buildPages());
+
+        addSecao ("Operacao");
+        addTab ("Monitoracao",   buildMonitor());
+        addTab ("Gravacao",      buildRec());
+        addTab ("Automacao",     buildAutomation());
+        addTab ("DSP",           buildDsp());
+
+        addSecao ("Sistema");
+        addTab ("Rede",          buildNetwork());
+        addTab ("Usuarios",      buildUsers());
+        addTab ("Geral",         buildSystem());
     }
 
     /** TODAS as fontes de audio que a maquina oferece agora, numa lista so:
@@ -721,6 +767,57 @@ private:
                                              : placa->getText().toStdString();
             };
             p->addRow ("Placa de rede", placa);
+            {
+                auto* carga = new juce::ComboBox();
+                for (int v : { 10, 96, 97, 98, 100 })
+                    carga->addItem (juce::String (v), v);
+                carga->setSelectedId (settings.livewireCarga, juce::dontSendNotification);
+                carga->onChange = [this, carga]
+                { settings.livewireCarga = carga->getSelectedId(); };
+                p->addRow ("Tipo de carga RTP", carga);
+
+                toggle (*p, "Anunciar as fontes na rede", settings.livewireAnuncio,
+                        [this] (bool v) { settings.livewireAnuncio = v; });
+                p->addNote ("Faz a mesa aparecer na lista de fontes do QOR e tira o rotulo "
+                            "\"Used EW\". O anuncio identifica o no pelo par HWID/INIP. O HWID "
+                            "sai do NOME da maquina, e nao do IP — foi por sair do IP que o "
+                            "anuncio da mesa apagava as fontes do IP-Driver da Axia, que "
+                            "divide o IP com ela. Se depois de ligar as fontes do driver "
+                            "sumirem do QOR, desligue e avise: o sintoma voltou.");
+
+                auto* hwidBox = new juce::TextEditor();
+                hwidBox->setText (juce::String (settings.livewireHwid), juce::dontSendNotification);
+                hwidBox->setInputRestrictions (5, "0123456789");
+                hwidBox->onTextChange = [this, hwidBox]
+                { settings.livewireHwid = hwidBox->getText().getIntValue(); };
+                p->addRow ("HWID do anuncio (0 = automatico)", hwidBox);
+                p->addNote ("Deixe em zero. So preencha se o ouvinte de anuncios mostrar outro "
+                            "equipamento ja com o mesmo HWID — dois nos com o mesmo numero "
+                            "viram um so para o console, e um apaga as fontes do outro.");
+
+                auto* udpcBox = new juce::TextEditor();
+                udpcBox->setText (juce::String (settings.livewireUdpc), juce::dontSendNotification);
+                udpcBox->setInputRestrictions (5, "0123456789");
+                udpcBox->onTextChange = [this, udpcBox]
+                { settings.livewireUdpc = udpcBox->getText().getIntValue(); };
+                p->addRow ("Porta de controle anunciada (UDPC)", udpcBox);
+                p->addNote ("A porta que o anuncio promete e que a mesa abre para escutar. NAO "
+                            "use 4000 em maquina com o IP-Driver: e a porta dele, e o que o "
+                            "console dissesse chegaria ao vizinho. Tudo que chegar nesta porta "
+                            "vai para anuncios-recebidos.txt, na pasta de configuracao. Se o "
+                            "arquivo ficar vazio com o anuncio ligado, o console nao fala com "
+                            "o no — e a resposta de que precisamos.");
+                p->addNote ("So vale para o que a mesa TRANSMITE. O numero que a Axia espera "
+                            "nao esta publicado, e equipamento que nao reconhece o numero "
+                            "simplesmente descarta o pacote — sai audio e ninguem recebe. Se "
+                            "o canal transmitido nao aparecer no QOR, e o primeiro ajuste a "
+                            "tentar. Exige fechar as configuracoes.");
+            }
+
+            p->addNote ("So a placa escolhida e varrida. Em maquina ligada a duas redes — "
+                        "a da emissora e a de teste — varrer tudo traz dezenas de fontes que "
+                        "nao interessam e esconde a que importa. Escolher a placa aqui e o "
+                        "que o painel da Axia pede, e pela mesma razao.");
             p->addNote ("A mesma que o painel da Axia chama de Livewire Network Card. "
                         "Em automatica, a mesa usa a placa que enxerga os equipamentos "
                         "encontrados na varredura — e o que evita o pior sintoma desta "
@@ -836,6 +933,13 @@ private:
                                       "MIC Externo", "Linha", "Telefone", "Codec",
                                       "Player de PC", "Feed de Estudio" };
 
+        // Cabecalho da tabela, como no Source Profiles do QOR.
+        {
+            auto* cab = new LinhaTabela();
+            cab->defineColunas ({ "NOME", "USO", "FONTE" }, { 0.30f, 0.30f, 0.40f }, true);
+            p->addWide (cab, 22);
+        }
+
         for (size_t i = 0; i < settings.catalog.sources.size(); ++i)
         {
             const auto& src = settings.catalog.sources[i];
@@ -848,12 +952,14 @@ private:
             else if (src.index >= 0)           fonte = "entrada " + juce::String (src.index + 1);
             else                               fonte = "sem fonte";
 
-            auto* linha = new juce::TextButton (juce::String (src.name)
-                                                + "      " + usos[juce::jlimit (0, 9, src.type)]
-                                                + "      " + fonte);
-            linha->setColour (juce::TextButton::buttonColourId, theme::surfaceLo);
-            linha->onClick = [this, i] { editandoInput = int (i); rebuildTabs(); };
-            p->addWide (linha, 28);
+            auto* linha = new LinhaTabela();
+            linha->par = (i % 2) == 0;
+            linha->defineColunas ({ juce::String (src.name),
+                                    usos[juce::jlimit (0, 9, src.type)],
+                                    fonte },
+                                  { 0.30f, 0.30f, 0.40f });
+            linha->aoClicar = [this, i] { editandoInput = int (i); rebuildTabs(); };
+            p->addWide (linha, 26);
         }
 
 
@@ -1251,6 +1357,7 @@ private:
             mesa::OutputDef o;
             o.name = "OUTPUT " + std::to_string (settings.outputs.outputs.size() + 1);
             settings.outputs.add (o);
+            editandoOutput = int (settings.outputs.outputs.size()) - 1;
             rebuildTabs();
         };
         p->addRow ("Novo", add, 30);
@@ -1258,7 +1365,55 @@ private:
         static const char* busNames[] = { "PGM 1", "PGM 2", "PGM 3", "PGM 4",
                                           "CUE", "Monitor CR", "Fone", "Estudio" };
 
-        for (size_t oi = 0; oi < settings.outputs.outputs.size(); ++oi)
+        // LISTA antes do detalhe, como nos inputs.
+        //
+        // Antes todos os outputs vinham abertos e empilhados: com cinco
+        // destinos a pagina virava um rolo onde nao dava para comparar nada.
+        // A lista mostra os cinco de relance; o detalhe abre no que interessa.
+        if (editandoOutput < 0)
+        {
+            auto* cab = new LinhaTabela();
+            cab->defineColunas ({ "NOME", "O QUE SAI", "DESTINO" },
+                                { 0.30f, 0.25f, 0.45f }, true);
+            p->addWide (cab, 22);
+
+            for (size_t oi = 0; oi < settings.outputs.outputs.size(); ++oi)
+            {
+                const auto& o = settings.outputs.outputs[oi];
+
+                juce::String destino;
+                if (o.livewireChannel > 0)      destino = "Livewire " + juce::String (o.livewireChannel);
+                else if (! o.streamName.empty()) destino = "NDI " + juce::String (o.streamName);
+                else if (! o.deviceName.empty()) destino = juce::String (o.deviceName)
+                                                         + "  par " + juce::String (o.pair + 1);
+                else if (o.pair >= 0)            destino = "saidas " + juce::String (o.pair * 2 + 1)
+                                                         + "/" + juce::String (o.pair * 2 + 2);
+                else                             destino = "nao roteado";
+
+                auto* linha = new LinhaTabela();
+                linha->par = (oi % 2) == 0;
+                linha->defineColunas ({ juce::String (o.name),
+                                        busNames[juce::jlimit (0, 7, o.busSource)],
+                                        destino },
+                                      { 0.30f, 0.25f, 0.45f });
+                linha->aoClicar = [this, oi] { editandoOutput = int (oi); rebuildTabs(); };
+                p->addWide (linha, 26);
+            }
+
+            if (settings.outputs.outputs.empty())
+                p->addNote ("Nenhum output ainda. Aperte ADICIONAR OUTPUT.");
+
+            return p;
+        }
+
+        {
+            auto* voltar = new juce::TextButton ("< VOLTAR A LISTA");
+            voltar->onClick = [this] { editandoOutput = -1; rebuildTabs(); };
+            p->addWide (voltar, 30);
+        }
+
+        for (size_t oi = size_t (editandoOutput);
+             oi < settings.outputs.outputs.size() && int (oi) == editandoOutput; ++oi)
         {
             auto& out = settings.outputs.outputs[oi];
             p->addTitle (juce::String (out.name));
@@ -1359,17 +1514,19 @@ private:
 
             }
 
+            dbSlider (*p, "Ganho desta saida", out.ganhoDb, -20.0f, 20.0f,
+                      [&out] (float v) { out.ganhoDb = v; });
+            p->addNote ("Casa o nivel com o equipamento deste destino: o transmissor quer um "
+                        "nivel, o gravador quer outro. Zero e o correto quando o equipamento "
+                        "espera o mesmo nivel de referencia da mesa.");
+
             auto* del = new juce::TextButton ("REMOVER OUTPUT");
             const std::string nameCopy = out.name;
-            del->onClick = [this, nameCopy] { settings.outputs.remove (nameCopy); rebuildTabs(); };
+            del->onClick = [this, nameCopy]
+            { settings.outputs.remove (nameCopy); editandoOutput = -1; rebuildTabs(); };
             p->addRow ("", del, 28);
         }
 
-        if (settings.outputs.outputs.empty())
-            p->addNote ("Nenhum output ainda. Aperte ADICIONAR OUTPUT.");
-
-        dbSlider (*p, "Ganho do master", settings.routing.masterGainDb, -20.0f, 20.0f,
-                  [this] (float v) { settings.routing.masterGainDb = v; mix.masterGainDb.store (v); });
         return p;
     }
 
@@ -2053,6 +2210,38 @@ private:
             p->addRow ("", padrao, 28);
         }
 
+        p->addTitle ("Tamanho da mesa");
+        {
+            auto* esc = new juce::ComboBox();
+            esc->addItem ("automatica (pelo tamanho da tela)", 1);
+            esc->addItem ("100%", 2);
+            esc->addItem ("90%",  3);
+            esc->addItem ("80%",  4);
+            esc->addItem ("70%",  5);
+            esc->addItem ("60%",  6);
+
+            const float e = settings.routing.escalaInterface;
+            esc->setSelectedId (e < 0.01f ? 1
+                              : e > 0.95f ? 2
+                              : e > 0.85f ? 3
+                              : e > 0.75f ? 4
+                              : e > 0.65f ? 5 : 6,
+                                juce::dontSendNotification);
+
+            esc->onChange = [this, esc]
+            {
+                static const float valores[] = { 0.0f, 1.0f, 0.9f, 0.8f, 0.7f, 0.6f };
+                const int i = juce::jlimit (1, 6, esc->getSelectedId());
+                settings.routing.escalaInterface = valores[i - 1];
+            };
+            p->addRow ("Escala da interface", esc);
+            p->addNote ("A mesa e desenhada para 1920x1080. Em tela menor, cortar seria "
+                        "perder controles; escalar mantem tudo visivel, so menor. Em "
+                        "automatica ela mede a tela sozinha. O ajuste manual serve a quem "
+                        "quer a mesa menor que a tela, com espaco para outra janela ao "
+                        "lado. Exige reabrir.");
+        }
+
         p->addTitle ("Registro tecnico");
         p->addNote ("O que a mesa esta fazendo — comandos, rede, avisos. Ficava na tela "
                     "principal, mas defeito se investiga sentado, e a tela do operador vale "
@@ -2256,7 +2445,15 @@ private:
     juce::AudioDeviceManager& deviceManager;
     juce::File settingsFile;
     SecondaryDevices* secondaries = nullptr;
-    juce::TabbedComponent tabs;
+    MenuLateral menu;
+    juce::OwnedArray<CfgScroller> paginas;
+    int paginaAtual = 0;
+
+    CfgScroller* paginaCorrente() const
+    {
+        return juce::isPositiveAndBelow (paginaAtual, paginas.size())
+             ? paginas[paginaAtual] : nullptr;
+    }
     juce::TextButton saveButton;
     juce::Label statusLabel, versaoLabel;
     juce::Label* ndiList = nullptr;
@@ -2272,6 +2469,8 @@ public:
 
 private:
     int editandoInput = -1;
+    /** Output aberto em detalhe; -1 mostra a lista. */
+    int editandoOutput = -1;
     juce::String livewireStatus { "nao consultado" };
     std::vector<VmixClient::Input> vmixInputs;
     juce::String vmixStatus { "nao consultado" };

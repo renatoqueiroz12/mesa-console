@@ -2,6 +2,40 @@
 #include "MainComponent.h"
 #include "../Core/NomeDaThread.h"
 #include "../Core/Version.h"
+#include "../Core/Rastro.h"
+
+/** Escala da interface — fora da classe para poder rodar ANTES de qualquer
+janela nascer, que e o que o JUCE pede. */
+/** Quanto encolher para a mesa caber nesta tela. */
+inline float escalaParaCaber()
+{
+    auto* disp = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
+    if (disp == nullptr) return 1.0f;
+
+    const auto area = disp->userArea;
+    const float porLargura = float (area.getWidth())  / 1920.0f;
+    const float porAltura  = float (area.getHeight()) / 1080.0f;
+    const float cabe = juce::jmin (porLargura, porAltura);
+
+    // nunca AUMENTA: em tela grande a mesa fica no tamanho de desenho,
+    // com margem em volta, que e melhor do que esticar
+    return juce::jlimit (0.5f, 1.0f, cabe);
+}
+
+inline void aplicaEscala()
+{
+    mesa::Settings cfg;
+    const auto arquivo = juce::File::getSpecialLocation (
+                             juce::File::userApplicationDataDirectory)
+                         .getChildFile ("MesaConsole").getChildFile ("settings.json");
+    mesa::loadSettings (arquivo.getFullPathName().toStdString(), cfg);
+
+    const float escala = cfg.routing.escalaInterface > 0.01f
+                       ? cfg.routing.escalaInterface
+                       : escalaParaCaber();
+
+    juce::Desktop::getInstance().setGlobalScaleFactor (escala);
+}
 
 class MesaApplication : public juce::JUCEApplication
 {
@@ -10,14 +44,39 @@ public:
     const juce::String getApplicationVersion() override { return "0.1.0"; }
     bool moreThanOneInstanceAllowed() override          { return false; }
 
+    /** Segunda instancia traz a primeira para a frente.
+
+        A recusa de multiplas instancias ja existia acima; faltava o que fazer
+        quando alguem tenta abrir de novo — sem isto o duplo clique parecia nao
+        funcionar. */
+    void anotherInstanceStarted (const juce::String&) override
+    {
+        // traz a que ja esta rodando para a frente, em vez de abrir outra
+        if (mainWindow != nullptr)
+        {
+            mainWindow->setMinimised (false);
+            mainWindow->toFront (true);
+        }
+    }
+
     void initialise (const juce::String&) override
     {
+        mesa::rastroComeca();
         // Captura de queda: sem isso, um crash de madrugada nao deixa nada
         // alem do processo sumido. Com isso, fica o local exato no disco.
         juce::SystemStats::setApplicationCrashHandler ([] (void*)
         {
-            auto f = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
-                        .getParentDirectory().getChildFile ("mesa-crash.log");
+            // Junto das configuracoes, que e pasta SEMPRE GRAVAVEL.
+            //
+            // Ficava ao lado do executavel. Numa maquina onde a pasta do
+            // programa nao aceita escrita, a queda acontecia e o registro nao
+            // saia — ficavamos sabendo que caiu e nada mais. Registro que
+            // depende de permissao e registro que falta na hora errada.
+            auto pasta = juce::File::getSpecialLocation (
+                             juce::File::userApplicationDataDirectory)
+                         .getChildFile ("MesaConsole");
+            pasta.createDirectory();
+            auto f = pasta.getChildFile ("mesa-crash.log");
             // QUAL thread caiu.
             //
             // A pilha do Windows vem sem os nossos simbolos e termina em
@@ -33,7 +92,19 @@ public:
                           false, false, "\n");
         });
 
+        // Escala ANTES de existir janela.
+        //
+        // O JUCE pede que o fator global seja definido antes de qualquer
+        // janela nascer. Chamando de dentro do construtor, a janela ja estava
+        // meio montada quando a escala mudava — e este arranque caiu tao cedo
+        // que nem o log chegou a abrir.
+        mesa::rastro ("antes da escala");
+        aplicaEscala();
+        mesa::rastro ("escala aplicada");
+
+        mesa::rastro ("criando a janela");
         mainWindow = std::make_unique<MainWindow> (getApplicationName());
+        mesa::rastro ("janela criada");
     }
 
     void shutdown() override
@@ -76,9 +147,18 @@ private:
             centreWithSize (getWidth(), getHeight());
             setVisible (true);
 
-            // Cobre a barra de tarefas.
-            juce::Desktop::getInstance().setKioskModeComponent (this, false);
+            // Cobre a barra de tarefas — mas so entra em tela cheia se couber.
+            //
+            // Em monitor menor que o desenho da mesa, o modo quiosque deixava
+            // as bordas fora do alcance e nem os botoes de janela apareciam.
+            // Melhor abrir em janela normal, onde da para rolar e mover, do
+            // que cobrir uma tela que nao cabe.
+            if (auto* disp = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
+                if (disp->userArea.getWidth() >= 1920 && disp->userArea.getHeight() >= 1080)
+                    juce::Desktop::getInstance().setKioskModeComponent (this, false);
         }
+
+
 
         void closeButtonPressed() override { JUCEApplication::getInstance()->systemRequestedQuit(); }
 

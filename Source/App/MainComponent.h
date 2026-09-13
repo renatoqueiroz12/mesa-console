@@ -12,6 +12,7 @@
 #include "GpioClient.h"
 #include "SpeechWriter.h"
 #include "Recorder.h"
+#include "../Core/Rastro.h"
 #include "SpeechStreamer.h"
 #include "../Core/RemoteCommand.h"
 #include <map>
@@ -41,6 +42,7 @@ public:
 
     explicit MainComponent (int numChannels) : engine (numChannels), bridge (engine.mixer)
     {
+        mesa::rastro ("componente: inicio");
         // ONDE a configuracao mora.
         //
         // Ate aqui ela ficava ao lado do exe, dentro de build/ — pasta
@@ -54,6 +56,7 @@ public:
                         .getChildFile ("MesaConsole");
         pasta.createDirectory();
 
+        mesa::rastro ("componente: pastas");
         settingsFile = pasta.getChildFile ("settings.json");
         sceneFile    = pasta.getChildFile ("scene.json");
 
@@ -73,12 +76,27 @@ public:
         else
             settingsFile.replaceWithText (mesa::settingsToJson (settings));
 
+        mesa::rastro ("componente: abrindo audio ("
+                      + (settings.deviceState.empty() ? juce::String ("padrao")
+                                                      : juce::String ("estado salvo)")));
         auto err = engine.start (numChannels, 8, juce::String (settings.deviceState));
         openError = err;
 
+        if (settings.deviceState.empty())
+            pendingLog.add ("sem placa escolhida: abrindo o audio do Windows. "
+                            "Para menor latencia, escolha o ASIO em Sistema.");
+
+        if (engine.placaSalvaAusente.isNotEmpty())
+            pendingLog.add ("placa salva nao existe nesta maquina: \""
+                            + engine.placaSalvaAusente
+                            + "\" — abrindo a padrao. Confira em Sistema.");
+
+        mesa::rastro ("componente: roteamento");
         mesa::applyRouting (settings, engine.mixer);
+        mesa::rastro ("componente: comandos");
         sender = std::make_unique<CommandSender> (engine.automation, settings);
 
+        mesa::rastro ("componente: cena");
         mesa::Scene scene;
         if (sceneFile.existsAsFile()
             && mesa::sceneFromJson (sceneFile.loadFileAsString().toStdString(), scene))
@@ -90,6 +108,7 @@ public:
             logToFile ("primeira execucao: cena de fabrica criada");
         }
 
+        mesa::rastro ("componente: interface");
         addAndMakeVisible (bridge);
 
         layerA = std::make_unique<SurfaceButton> ("A", theme::busGreen, 28.0f);
@@ -131,15 +150,20 @@ public:
         }
 
         iniciaGpio();
+        mesa::rastro ("iniciando a fala");
         iniciaFala();
 
         // o gravador recebe direto do callback; a fila e dele
         engine.aoGravar = [this] (const float* x, int n) { gravador.alimenta (x, n); };
 
+        mesa::rastro ("placas secundarias");
         secondaries.setLatencyMode (settings.secondaryLatencyMode);
+        mesa::rastro ("criando o hub de rede");
         hub = std::make_unique<NetworkHub> (engine, secondaries);
         hub->setPlacaLivewire (juce::String (settings.livewirePlaca));
+        hub->setTipoDeCarga (settings.livewireCarga);
         hub->aoRegistrar = [this] (const juce::String& m) { pendingLog.add (m); };
+        mesa::rastro ("ligando a rede");
         rebindNetwork();
 
         masterPanel = std::make_unique<MasterPanel> (engine.mixer, engine.automation);
@@ -155,14 +179,26 @@ public:
         // acoes que o operador ainda vai querer: encolher para olhar outra
         // coisa, sair do modo tela cheia, e fechar. Ficam numa faixa estreita
         // na borda, longe dos faders — nao se aperta sem querer.
-        janelaMin = std::make_unique<SurfaceButton> ("\xe2\x80\x94", theme::busGreen, 15.0f);
+        // simbolos de janela padrao: traco, quadrado e X — os mesmos do Windows
+        janelaMin = std::make_unique<SurfaceButton> (juce::String::fromUTF8 ("\xe2\x80\x93"), theme::textDim, 16.0f);
         janelaMin->onClick = [this]
         {
+            // Sai da tela cheia ANTES de encolher.
+            //
+            // Em modo quiosque o pedido de minimizar era ignorado e a janela
+            // se reexpandia — o botao parecia fazer o contrario do que diz.
+            auto& d = juce::Desktop::getInstance();
+            if (d.getKioskModeComponent() != nullptr)
+            {
+                d.setKioskModeComponent (nullptr, false);
+                if (janelaTela != nullptr) janelaTela->setActive (false);
+            }
+
             if (auto* peer = getPeer()) peer->setMinimised (true);
         };
         addAndMakeVisible (*janelaMin);
 
-        janelaTela = std::make_unique<SurfaceButton> ("[ ]", theme::busGreen, 13.0f);
+        janelaTela = std::make_unique<SurfaceButton> (juce::String::fromUTF8 ("\xe2\x96\xa1"), theme::textDim, 15.0f);
         janelaTela->setActive (true);
         janelaTela->onClick = [this]
         {
@@ -198,7 +234,7 @@ public:
         recStop->onClick = [this] { if (gravador.estaGravando()) alternaGravacao (-1); };
         addAndMakeVisible (*recStop);
 
-        janelaSair = std::make_unique<SurfaceButton> ("X", theme::onRed, 15.0f);
+        janelaSair = std::make_unique<SurfaceButton> (juce::String::fromUTF8 ("\xc3\x97"), theme::onRed, 17.0f);
         janelaSair->onClick = [this]
         {
             // confirma: fechar a mesa no meio do ar por clique errado seria
@@ -260,7 +296,23 @@ public:
         // Resolucao de referencia: 1920x1080. O layout e proporcional, entao
         // ele acompanha janela maior ou menor — mas e nesta medida que as
         // proporcoes foram pensadas.
-        setSize (1920, 1080);
+        // Tamanho que CABE na tela desta maquina.
+        //
+        // Era 1920x1080 fixo. Em monitor menor a janela nascia maior que a
+        // tela: o rodape e os botoes de janela ficavam fora, e nao havia como
+        // alcanca-los. A mesa e desenhada para 1920x1080 e continua sendo —
+        // aqui so garantimos que ela nao ultrapasse o que existe.
+        {
+            const auto area = juce::Desktop::getInstance().getDisplays()
+                                  .getPrimaryDisplay() != nullptr
+                            ? juce::Desktop::getInstance().getDisplays()
+                                  .getPrimaryDisplay()->userArea
+                            : juce::Rectangle<int> (0, 0, 1920, 1080);
+
+            setSize (juce::jmin (1920, area.getWidth()),
+                     juce::jmin (1080, area.getHeight()));
+        }
+        mesa::rastro ("componente: ligando o relogio");
         startTimerHz (25);
     }
 
@@ -350,19 +402,20 @@ public:
         auto inner = chassis.reduced (10);
 
 
-        // Linha do topo: botoes de janela a esquerda, ponte de medidores no
-        // resto. Ficavam numa faixa vertical propria, que roubava largura da
-        // mesa inteira e deixava um vazio ao lado da coluna de layer.
+        // Botoes de janela no canto superior DIREITO, em linha.
+        //
+        // Estavam empilhados na vertical a esquerda, com a ordem invertida e
+        // simbolos improvisados. Todo programa do Windows poe minimizar,
+        // maximizar e fechar nessa ordem, deitados, no alto a direita — e a
+        // mao do operador ja vai ali sem pensar. Inventar posicao propria em
+        // mesa de ar custa segundos que nao existem.
         auto linhaTopo = inner.removeFromTop (84);
-        auto colJanela = linhaTopo.removeFromLeft (34);
-        linhaTopo.removeFromLeft (8);
 
-        const int hb = (colJanela.getHeight() - 8) / 3;
-        janelaSair->setBounds (colJanela.removeFromTop (hb));
-        colJanela.removeFromTop (4);
-        janelaMin ->setBounds (colJanela.removeFromTop (hb));
-        colJanela.removeFromTop (4);
-        janelaTela->setBounds (colJanela.removeFromTop (hb));
+        auto faixaBotoes = linhaTopo.removeFromTop (26);
+        const int largBotaoJanela = 44;
+        janelaSair->setBounds (faixaBotoes.removeFromRight (largBotaoJanela));
+        janelaTela->setBounds (faixaBotoes.removeFromRight (largBotaoJanela));
+        janelaMin ->setBounds (faixaBotoes.removeFromRight (largBotaoJanela));
 
         bridge.setBounds (linhaTopo);
         inner.removeFromTop (8);
@@ -519,10 +572,10 @@ private:
         configOpen = true;
         cfg->onLivewirePlaca = [this] (const juce::String& ip)
         {
+            // o proprio setPlacaLivewire ja derruba o que estava aberto na
+            // placa antiga; aqui so religamos
             hub->setPlacaLivewire (ip);
             log ("placa do Livewire: " + ip + " (deduzida da varredura)");
-            // religa agora: os receptores abertos estao presos a placa antiga
-            hub->fechaLivewire();
             rebindNetwork();
         };
         // avisa tambem ao arrancar: quem herda uma configuracao pronta nunca
@@ -728,6 +781,9 @@ private:
                            : juce::String())
                   : juce::String())
           << (hub != nullptr ? hub->estadoLivewire() + hub->estadoNdi() : juce::String())
+          << (hub != nullptr && hub->anunciosEnviados() > 0
+                  ? "  |  anuncios " + juce::String (hub->anunciosEnviados())
+                  : juce::String())
           << "  |  secundarias " << juce::String (secondaries.count());
 
         // Dois faders carregando o MESMO input entregam o mesmo sinal duas
@@ -1176,6 +1232,7 @@ private:
             if (o.busSource < 0 || o.busSource >= mesa::kNumBuses) continue;
 
             settings.routing.busOutputPair[o.busSource] = o.pair;
+            settings.routing.busGainDb[o.busSource]     = o.ganhoDb;
         }
         mesa::applyRouting (settings, engine.mixer);
     }
@@ -1212,6 +1269,16 @@ private:
         const int    bl = juce::jmax (32, engine.blockSize.load());
         hub->rebind        (settings.catalog, sr, bl);
         hub->rebindOutputs (settings.outputs, sr, bl);
+
+        // DEPOIS de os transmissores existirem.
+        //
+        // Estava antes, e anunciava uma lista vazia: os transmissores nascem
+        // no rebindOutputs, logo acima. Anunciar o que ainda nao existe nao
+        // falha com erro — simplesmente nao anuncia nada, e o log dizia "0
+        // saidas Livewire" sem que nada parecesse errado.
+        hub->setIdentidadeAnuncio (settings.livewireHwid, settings.livewireUdpc);
+        hub->permiteAnuncio (settings.livewireAnuncio);
+        hub->atualizaAnuncio (juce::String (settings.network.machineName));
     }
 
     void timerCallback() override

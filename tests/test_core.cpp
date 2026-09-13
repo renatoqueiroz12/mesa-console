@@ -7,6 +7,7 @@
 #include "../Source/Core/Defaults.h"
 #include "../Source/Core/SpeechSegmenter.h"
 #include "../Source/Core/AutomationEngine.h"
+#include "../Source/Core/AnuncioLw.h"
 #include <thread>
 #include <cstdio>
 #include <cmath>
@@ -1514,6 +1515,139 @@ int main()
         check (cat.sources[1].index == -1, "PC LOCAL sai da lista de rede");
         check (cat.sources[2].index != slotDoNote, "NOTE muda de posicao");
         check (cat.sources[2].index == 1, "NOTE assume a posicao que era do PC LOCAL");
+    }
+
+    // -------- ritmo por prazo acumulado, e nao por dormida arredondada
+    {
+        // 512 amostras a 48 kHz duram 10,67 ms. Dormir "int(10,67)" = 10 ms da
+        // 6,7% de voltas a mais por segundo — foi assim que uma fonte NDI
+        // entregou 50469 amostras onde a mesa consome 48000. A fila enchia e o
+        // excedente era descartado, o que soa como picotar.
+        const double sr = 48000.0;
+        const int bloco = 512;
+        const double duracao = 1000.0 * bloco / sr;
+
+        const double taxaArredondada = (1000.0 / double (int (duracao))) * bloco;
+        check (taxaArredondada > 50000.0, "dormida arredondada entrega demais");
+
+        double prazo = 0.0, relogio = 0.0;
+        long long amostras = 0;
+        for (int i = 0; i < 1000; ++i)
+        {
+            prazo += duracao;
+            const double falta = prazo - relogio;
+            if (falta > 1.0) relogio += double (int (falta));
+            amostras += bloco;
+        }
+        const double taxaPrazo = double (amostras) / (relogio / 1000.0);
+        check (std::fabs (taxaPrazo - sr) < 2000.0, "prazo acumulado fica na taxa certa");
+    }
+
+
+    // -------- anuncio Livewire: os bytes que o QOR le
+    {
+        // Por que testar isto aqui: enquanto o pacote nascia dentro do socket,
+        // errar um tamanho de bloco so aparecia com o console na frente. O
+        // leitor confere o escritor, e o mesmo leitor le o anuncio do driver.
+        using namespace mesa::lw;
+
+        Identidade eu;
+        eu.hwid = 0x4d31;
+        eu.ip   = (192u << 24) | (168u << 16) | (2u << 8) | 116u;
+        eu.udpc = 4002;
+        eu.maquina = "DESKTOP-ASA-30";
+
+        std::vector<FonteAnuncio> uma { { 3600, "MESA", 0 } };
+
+        const auto lista = montaLista (eu, uma, 7);
+        const auto a = le (lista.data(), lista.size());
+        check (a.ok, "anuncio ADVT 1 decodifica");
+        check (a.consumidos == lista.size(), "ADVT 1: nenhum byte sobra");
+        check (a.advt == 1 && a.contador == 7, "ADVT 1: tipo e contador");
+        check (a.hwid == 0x4d31 && a.ip == eu.ip && a.udpc == 4002, "ADVT 1: identidade do no");
+        check (a.nums == 1 && a.maquina == "DESKTOP-ASA-30", "ADVT 1: NUMS e nome da maquina");
+        check (a.fontes.size() == 1 && a.fontes[0].canal == 3600
+                   && a.fontes[0].nome == "MESA", "ADVT 1: a fonte chega inteira");
+
+        const auto vida = montaVida (eu, 4, 8);
+        const auto b = le (vida.data(), vida.size());
+        check (b.ok && b.consumidos == vida.size() && b.advt == 2 && b.nums == 4,
+               "anuncio ADVT 2 fecha certo");
+
+        std::vector<FonteAnuncio> duas { { 3600, "", 0 },
+                                         { 3601, "", 0x1122334455667788ull } };
+        const auto uso = montaUso (eu, duas, 9);
+        const auto c = le (uso.data(), uso.size());
+        check (c.ok && c.consumidos == uso.size() && c.advt == 3, "anuncio ADVT 3 fecha certo");
+        check (c.fontes.size() == 2 && c.fontes[0].uso == 0
+                   && c.fontes[1].uso == 0x1122334455667788ull, "ADVT 3: BUSY por fonte");
+
+        // NEST e os tamanhos de bloco tem de acompanhar o numero de fontes:
+        // ja mandamos NEST fixo em 7 com uma fonte so, e o anuncio prometia
+        // quatro blocos e entregava um.
+        std::vector<FonteAnuncio> muitas;
+        for (int i = 0; i < 16; ++i)
+            muitas.push_back ({ 3600 + i, "CANAL " + std::to_string (i), 0 });
+        const auto grande = montaLista (eu, muitas, 1);
+        const auto d = le (grande.data(), grande.size());
+        check (d.ok && d.consumidos == grande.size() && d.fontes.size() == 16
+                   && d.nums == 16, "anuncio com 16 fontes fecha certo");
+
+        // nome que enche o campo tem de sobrar o zero do fim
+        const auto comprido = montaLista (eu, { { 3600, "NOME MUITO COMPRIDO DEMAIS", 0 } }, 1);
+        const auto e = le (comprido.data(), comprido.size());
+        check (e.ok && e.fontes[0].nome.size() == 15, "PSNM corta em 15 e guarda o zero");
+
+        // pacote cortado nao pode passar por bom
+        bool recusouTodos = true;
+        for (size_t corte : { size_t (8), size_t (20), lista.size() - 3, lista.size() - 1 })
+            recusouTodos &= ! le (lista.data(), corte).ok;
+        check (recusouTodos, "anuncio cortado e recusado, nao adivinhado");
+
+        std::vector<std::uint8_t> lixo (64, 0xab);
+        lixo[0] = 0x03; lixo[1] = 0x00; lixo[2] = 0x02; lixo[3] = 0x07;
+        check (! le (lixo.data(), lixo.size()).ok, "lixo com cabecalho certo e recusado");
+
+        // HWID: estavel entre arranques e, por construcao, diferente do que o
+        // IP daria — que e o do IP-Driver na mesma maquina.
+        const unsigned doIp  = eu.ip & 0xffffu;
+        const unsigned nosso = hwidDeTexto ("DESKTOP-ASA-30/MesaConsole");
+        check (nosso == hwidDeTexto ("DESKTOP-ASA-30/MesaConsole"), "HWID nao muda entre chamadas");
+        check (nosso != 0 && nosso != 0xffff, "HWID foge dos extremos");
+        check (hwidDeTexto ("A") != hwidDeTexto ("B"), "nomes diferentes dao HWIDs diferentes");
+        check (hwidLivre (doIp, { doIp }) != doIp, "HWID ocupado faz escolher outro");
+        check (hwidLivre (nosso, { nosso, nosso + 1 }) == nosso + 2, "sobe ate achar vago");
+        check (hwidLivre (nosso, {}) == nosso, "sem ninguem no caminho, fica o desejado");
+
+        // -------- o comando WRIN que o QOR manda pela porta de controle
+        //
+        // Capturado da rede: o console escreve o estado de uso da fonte e
+        // espera ve-lo de volta no ADVT 3. Ignorar isso foi a causa do
+        // "Used EW" — ele reescrevia o mesmo comando uma vez por segundo.
+        {
+            const std::uint8_t comando[] = {
+                0x03,0x00,0x02,0x07, 0x00,0x01,0x01,0x8e,
+                0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
+                'N','E','S','T', 0x00, 0x01,
+                'S','0','0','1', 0x06, 0x00,0x1c,
+                'W','R','I','N', 0x00, 0x02,
+                'P','S','I','D', 0x01, 0x00,0x00,0x0e,0x10,
+                'B','U','S','Y', 0x09, 0x00,0x02,0x02,0x0a,0x00,0x00,0xc0,0xa8 };
+
+            const auto w = le (comando, sizeof (comando));
+            check (w.ok && w.consumidos == sizeof (comando), "comando WRIN decodifica inteiro");
+            check (w.advt == 0, "comando WRIN nao traz ADVT — e escrita, nao anuncio");
+            check (w.fontes.size() == 1 && w.fontes[0].canal == 3600, "WRIN diz de que canal fala");
+            check (w.fontes[0].uso == 0x0002020a0000c0a8ull, "WRIN traz o BUSY a publicar");
+
+            // e o que sai no ADVT 3 tem de ser exatamente aquilo de volta
+            std::vector<FonteAnuncio> comUso { { 3600, "MESA", w.fontes[0].uso } };
+            const auto eco = montaUso (eu, comUso, 1);
+            const auto lido = le (eco.data(), eco.size());
+            check (lido.ok && lido.fontes.size() == 1
+                       && lido.fontes[0].uso == 0x0002020a0000c0a8ull,
+                   "o ADVT 3 devolve o BUSY que o console escreveu");
+        }
     }
 
 

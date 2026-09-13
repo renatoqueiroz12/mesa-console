@@ -1,4 +1,8 @@
 #pragma once
+#if JUCE_WINDOWS
+ #include <winsock2.h>
+ #include <ws2tcpip.h>
+#endif
 #include "../Core/NomeDaThread.h"
 #include <juce_core/juce_core.h>
 #include "../Core/AsyncSource.h"
@@ -32,6 +36,33 @@ public:
 
     ~LivewireSender() { stop(); }
 
+    /** Tipo de carga RTP que anunciamos.
+
+        Ajustavel porque o numero certo nao esta publicado, e o equipamento do
+        outro lado pode recusar o que nao reconhece. O padrao 96 e o que a
+        faixa dinamica do RTP reserva; se a Axia esperar outro, muda-se aqui
+        sem recompilar. */
+    std::atomic<int> tipoDeCarga { 96 };
+
+    /** Diz ao sistema por qual interface o multicast deve sair. */
+    void defineePlacaDeSaida (const juce::String& placa)
+    {
+        if (placa.isEmpty() || socket == nullptr) return;
+
+       #if JUCE_WINDOWS
+        const int fd = socket->getRawSocketHandle();
+        if (fd < 0) return;
+
+        in_addr ifaddr {};
+        ifaddr.s_addr = ::inet_addr (placa.toRawUTF8());
+
+        ::setsockopt (SOCKET (fd), IPPROTO_IP, IP_MULTICAST_IF,
+                      reinterpret_cast<const char*> (&ifaddr), sizeof (ifaddr));
+       #else
+        juce::ignoreUnused (placa);
+       #endif
+    }
+
     static juce::String addressForChannel (int canal)
     {
         return "239.192." + juce::String ((canal >> 8) & 0xff)
@@ -59,6 +90,19 @@ public:
             return false;
         }
         socket->setMulticastLoopbackEnabled (true);
+
+        // POR QUAL PLACA O MULTICAST SAI.
+        //
+        // Amarrar o socket ao endereco da placa nao decide isso: o Windows
+        // escolhe a interface de saida pela tabela de rotas, e nesta maquina
+        // ha seis placas. O pacote saia por uma que nao leva a rede Livewire —
+        // o contador subia, o audio "estava sendo transmitido", e ninguem
+        // recebia.
+        //
+        // E o mesmo pedido que resolveu a recepcao, na direcao contraria: o
+        // painel da Axia tem UM campo de placa porque as duas pontas precisam
+        // dele.
+        defineePlacaDeSaida (localIp);
 
         ssrc = juce::Random::getSystemRandom().nextInt();
         seq = juce::uint16 (juce::Random::getSystemRandom().nextInt (65535));
@@ -119,7 +163,7 @@ private:
             // cabecalho RTP
             auto* p = pacote.data();
             p[0] = 0x80;                       // versao 2, sem padding nem CSRC
-            p[1] = 96;                         // carga dinamica, como o Livewire usa
+            p[1] = (unsigned char) tipoDeCarga.load (std::memory_order_relaxed);
             p[2] = (unsigned char) (seq >> 8);
             p[3] = (unsigned char) (seq & 0xff);
             escreve32 (p + 4, ts);

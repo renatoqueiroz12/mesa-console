@@ -47,6 +47,14 @@ struct RoutingSettings
     int ext2InputPair     = -1;
     float masterGainDb = 0.0f;
 
+    /** Escala da interface. 0 = automatica, pelo tamanho da tela.
+
+        A mesa e desenhada para 1920x1080. Em tela menor, cortar seria perder
+        controles; escalar mantem tudo visivel, so menor. O ajuste manual
+        existe para quem prefere a mesa menor que a tela — sobra espaco para
+        outra janela ao lado, coisa comum em estudio. */
+    float escalaInterface = 0.0f;
+
     /** CUE: onde entra e quanto abaixa o que ja tocava.
 
         Ficavam so no motor e sumiam ao reabrir a mesa — ajuste de estudio que
@@ -274,6 +282,29 @@ struct Settings
     /** Placa de rede do Livewire, por IP. Vazio deixa o Windows escolher — o
         que numa maquina com mais de uma placa costuma dar errado. */
     std::string livewirePlaca;
+    /** Tipo de carga RTP ao transmitir Livewire. 96 e o padrao; o numero que a
+        Axia espera nao esta publicado, entao fica ajustavel. */
+    int livewireCarga = 96;
+
+    /** Anunciar as fontes da mesa na rede. DESLIGADO de fabrica.
+
+        Historico: o anuncio identifica o NO pelo par HWID/INIP, e o HWID saia
+        do IP. Numa maquina que tambem roda o IP-Driver da Axia os dois dividem
+        o IP — o console via um no so e ficava com o ultimo anuncio, e o nosso,
+        com uma fonte, apagava as quatro do driver. Agora o HWID sai do nome da
+        maquina e nao pode coincidir com o do driver, entao conviver com os
+        dois deixou de ser proibido. Segue desligado de fabrica porque mexer no
+        que esta no ar pede decisao de quem opera, nao padrao de fabrica. */
+    bool livewireAnuncio = false;
+
+    /** Identificador do no no anuncio. 0 = deduzir do nome da maquina, que e o
+        recomendado. So mexa se outro equipamento da rede ja usar o valor — o
+        ouvinte de anuncios mostra os HWIDs vistos. */
+    int livewireHwid = 0;
+
+    /** Porta de controle publicada no campo UDPC, e que a mesa abre para
+        escutar. NAO use 4000 em maquina com o IP-Driver: e a porta dele. */
+    int livewireUdpc = 4002;
 
     /** No Axia/Livewire consultado para listar fontes (LWRP, porta 93). */
     std::string livewireNode;
@@ -395,6 +426,7 @@ inline std::string settingsToJson (const Settings& s)
     r.set ("ext1InputPair",     num (s.routing.ext1InputPair));
     r.set ("ext2InputPair",     num (s.routing.ext2InputPair));
     r.set ("masterGainDb",      num (s.routing.masterGainDb));
+    r.set ("escalaInterface",   num (s.routing.escalaInterface));
     r.set ("cueToPhones",       boolean (s.routing.cueToPhones));
     r.set ("cueToMonitor",      boolean (s.routing.cueToMonitor));
     r.set ("cueToStudio",       boolean (s.routing.cueToStudio));
@@ -514,6 +546,10 @@ inline std::string settingsToJson (const Settings& s)
     root.set ("gpioEnabled",     boolean (s.gpioEnabled));
     root.set ("gpioNode",        text (s.gpioNode));
     root.set ("livewirePlaca",   text (s.livewirePlaca));
+    root.set ("livewireCarga",   num (s.livewireCarga));
+    root.set ("livewireAnuncio", boolean (s.livewireAnuncio));
+    root.set ("livewireHwid",    num (s.livewireHwid));
+    root.set ("livewireUdpc",    num (s.livewireUdpc));
     root.set ("livewireNode",    text (s.livewireNode));
     root.set ("remoteEnabled",   boolean (s.remoteEnabled));
     root.set ("remoteUdpPort",   num (s.remoteUdpPort));
@@ -565,6 +601,7 @@ inline bool settingsFromJson (const std::string& src, Settings& out)
         out.routing.ext1InputPair     = int (r->number ("ext1InputPair", -1));
         out.routing.ext2InputPair     = int (r->number ("ext2InputPair", -1));
         out.routing.masterGainDb      = float (r->number ("masterGainDb", 0.0));
+        out.routing.escalaInterface   = float (r->number ("escalaInterface", 0.0));
         out.routing.cueToPhones       = r->boolean ("cueToPhones", true);
         out.routing.cueToMonitor      = r->boolean ("cueToMonitor", false);
         out.routing.cueToStudio       = r->boolean ("cueToStudio", false);
@@ -689,6 +726,10 @@ inline bool settingsFromJson (const std::string& src, Settings& out)
     out.gpioEnabled       = root.boolean ("gpioEnabled", false);
     out.gpioNode          = root.string ("gpioNode");
     out.livewirePlaca     = root.string ("livewirePlaca");
+    out.livewireCarga     = int (root.number ("livewireCarga", 96));
+    out.livewireAnuncio   = root.boolean ("livewireAnuncio", false);
+    out.livewireHwid      = int (root.number ("livewireHwid", 0));
+    out.livewireUdpc      = int (root.number ("livewireUdpc", 4002));
     out.livewireNode      = root.string ("livewireNode");
     out.remoteEnabled     = root.boolean ("remoteEnabled", true);
     out.remoteUdpPort     = int (root.number ("remoteUdpPort", 8890));

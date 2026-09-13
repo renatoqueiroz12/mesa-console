@@ -6,6 +6,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <set>
 #include <algorithm>
 
 /** Encontra os equipamentos Livewire da rede sozinho.
@@ -154,14 +155,28 @@ public:
     {
         std::lock_guard<std::mutex> g (mutex);
         std::vector<LwrpClient::Source> v;
+        std::set<std::pair<int, juce::String>> jaVistas;
+
         for (const auto& a : achados)
             for (const auto& f : a.fontes)
             {
+                // Canal invalido nao entra.
+                //
+                // Equipamento com fonte configurada mas sem canal devolve zero,
+                // e zero nao e endereco de coisa nenhuma. Oito linhas de "FM
+                // Pre-final" com canal 0 so atrapalhavam quem procurava.
+                if (f.livewireChannel <= 0) continue;
+
                 auto copia = f;
                 // o nome ganha a origem: numa rede com varios equipamentos,
                 // "PGM 01" sozinho nao diz de quem e
                 if (a.equipamento.isNotEmpty())
                     copia.name = f.name + " @" + a.equipamento;
+
+                // mesma fonte anunciada duas vezes entra uma so
+                const auto chave = std::make_pair (copia.livewireChannel, copia.name);
+                if (! jaVistas.insert (chave).second) continue;
+
                 v.push_back (copia);
             }
         return v;

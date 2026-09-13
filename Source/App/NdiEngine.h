@@ -250,9 +250,19 @@ public:
         sync = lib->framesync_create (recv);
         if (sync == nullptr) { lib->recv_destroy (recv); recv = nullptr; return false; }
 
-        // o framesync do NDI ja entrega no nosso sample rate: corrigir de novo
-        // seria dois controladores disputando a mesma fila
-        dst.setDriftCorrection (false);
+        // Correcao de relogio LIGADA tambem aqui.
+        //
+        // Estava desligada com um argumento que parecia solido: o framesync do
+        // NDI ja entrega no nosso sample rate, e corrigir de novo seria dois
+        // controladores disputando a mesma fila. Na pratica o framesync
+        // entregou 50469 amostras por segundo onde a mesa consome 48000 — 5% a
+        // mais, todo segundo. A fila enchia, o excedente era descartado, e
+        // descarte periodico soa exatamente como picotar.
+        //
+        // O framesync acerta a TAXA; ele nao acerta o RELOGIO da outra
+        // maquina. Sao coisas diferentes, e o segundo e justamente o que esta
+        // correcao existe para absorver — e o que mantem o Livewire limpo.
+        dst.setDriftCorrection (true);
 
         quit.store (false);
         abertoMs = juce::Time::getMillisecondCounterHiRes();
@@ -337,17 +347,26 @@ private:
             }
             lib->framesync_free_audio (sync, &frame);
 
-            // Ritmo REAL do bloco, no ritmo do relogio.
+            // Ritmo por PRAZO ACUMULADO, nao por dormida arredondada.
             //
-            // Dormia metade do tempo e pedia um bloco inteiro a cada volta:
-            // empurrava o dobro do tempo real, a fila transbordava e o
-            // excedente era descartado. "Dormir um pouco menos para nao secar"
-            // parecia prudente e era justamente a causa do picotado.
+            // Dormir "block/sr milissegundos" parece certo e nao e: 512
+            // amostras a 48 kHz duram 10,67 ms, e o arredondamento para
+            // inteiro dorme 10. Sao 6,7% de voltas a mais por segundo, todo
+            // segundo — foi assim que esta fonte entregou 50469 amostras onde
+            // a mesa consome 48000. A fila enchia e o excedente era
+            // descartado, o que soa exatamente como picotar.
             //
-            // A folga contra secar nao vem de empurrar mais, vem do tamanho da
-            // fila — e ela ja tem margem para isso.
-            const int ms = int (1000.0 * double (block) / sr);
-            std::this_thread::sleep_for (std::chrono::milliseconds (ms > 1 ? ms : 1));
+            // Guardando o prazo do proximo bloco em ponto flutuante, a fracao
+            // nao se perde: ela se acumula e a dormida seguinte a absorve.
+            prazo += 1000.0 * double (block) / sr;
+            const double agora = juce::Time::getMillisecondCounterHiRes();
+            const double falta = prazo - agora;
+
+            if (falta > 1.0)
+                std::this_thread::sleep_for (
+                    std::chrono::milliseconds (int (falta)));
+            else if (falta < -100.0)
+                prazo = agora;        // atrasou demais: recomeca do relogio
         }
     }
 
@@ -358,6 +377,9 @@ private:
     mesa::AsyncSource& dst;
     std::atomic<double> ultimoMs { 0.0 };
     double abertoMs = 0.0;
+    /** Prazo do proximo bloco, em ponto flutuante: a fracao de milissegundo
+        nao se perde entre uma volta e outra. */
+    double prazo = 0.0;
     std::atomic<int> recebidos { 0 };
     double sr;
     int block;

@@ -195,6 +195,12 @@ struct OutputDef
     /** Canal Livewire que a mesa TRANSMITE. Zero = nao transmite. */
     int  livewireChannel = 0;
     int  busSource = 0;                  // 0..3 = PGM 1..4, 4 = CUE, 5 = monitor, 6 = fone
+    /** Ganho DESTA saida, em dB.
+
+        Cada destino casa com um equipamento diferente: o transmissor quer um
+        nivel, o gravador quer outro, o estudio outro. Um ganho global no
+        barramento obrigaria a escolher qual deles fica certo. */
+    float ganhoDb = 0.0f;
 };
 
 struct OutputCatalog
@@ -388,6 +394,7 @@ inline json::Value outputsToJson (const OutputCatalog& c)
         v.set ("name",   json::text (o.name));
         v.set ("kind",   json::num  (o.kind));
         v.set ("pair",   json::num  (o.pair));
+        v.set ("ganhoDb", json::num  (o.ganhoDb));
         v.set ("stream", json::text (o.streamName));
         v.set ("device", json::text (o.deviceName));
         v.set ("deviceType", json::text (o.deviceType));
@@ -409,6 +416,7 @@ inline void outputsFromJson (const json::Value& a, OutputCatalog& c)
         o.name       = v.string ("name");
         o.kind       = int (v.number ("kind", 0));
         o.pair       = int (v.number ("pair", -1));
+        o.ganhoDb    = float (v.number ("ganhoDb", 0.0));
         o.streamName = v.string ("stream");
         o.deviceName = v.string ("device");
         o.deviceType = v.string ("deviceType");
