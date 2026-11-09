@@ -38,19 +38,33 @@
 class MainComponent : public juce::Component, private juce::Timer
 {
 public:
-    static constexpr int kFadersPerLayer = 8;
-    static constexpr int kLayers         = 2;
+    static constexpr int kLayers = 2;
 
-    /** Quantos canais a superficie precisa para encher TODAS as camadas.
+    /** Quantos faders por layer, lido do arquivo ANTES de a mesa nascer.
 
-        Nasceu de um defeito: o mixer era criado com 12 canais fixos no
-        Main.cpp, enquanto a superficie mostra 8 por camada em duas camadas. O
-        layer A ficava completo e o B com quatro tiras, cada uma do dobro da
-        largura, parecendo outra mesa. Quem conta agora e a superficie, que e
-        quem sabe de quantos precisa. */
-    static constexpr int kCanaisNecessarios = kFadersPerLayer * kLayers;
+        O mixer precisa saber de quantos canais vai ser no construtor, e a
+        configuracao normalmente e lida DENTRO dele - tarde demais. Entao este
+        pedaco le so o numero, direto do arquivo, e o Main.cpp o usa para
+        dimensionar tudo.
 
-    explicit MainComponent (int numChannels) : engine (numChannels), bridge (engine.mixer)
+        Arquivo ausente ou ilegivel devolve o padrao: mesa que nao abre por
+        causa de um campo de layout e pior que mesa com o layout de fabrica. */
+    static int fadersPorLayerSalvo()
+    {
+        const auto arq = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                             .getChildFile ("MesaConsole").getChildFile ("settings.json");
+        mesa::Settings s;
+        if (arq.existsAsFile())
+            mesa::settingsFromJson (arq.loadFileAsString().toStdString(), s);
+        return mesa::limitaFadersPorLayer (s.fadersPorLayer);
+    }
+
+    /** Canais que a superficie precisa para encher todas as layers. */
+    static int canaisNecessarios() { return fadersPorLayerSalvo() * kLayers; }
+
+    explicit MainComponent (int numChannels)
+        : fadersPorLayer (juce::jmax (1, numChannels / kLayers)),
+          engine (numChannels), bridge (engine.mixer)
     {
         mesa::rastro ("componente: inicio");
         // ONDE a configuracao mora.
@@ -260,8 +274,8 @@ public:
         };
         addAndMakeVisible (*janelaSair);
 
-        pageButton.setButtonText ("PAGINA: --");
-        pageButton.onClick = [this] { nextPage(); };
+        pageButton.setButtonText ("SNAPSHOT: --");
+        pageButton.onClick = [this] { abrePaginas(); };
         addAndMakeVisible (pageButton);
         updatePageButton();
 
@@ -490,8 +504,8 @@ private:
     void buildStrips()
     {
         strips.clear();
-        const int first = layer * kFadersPerLayer;
-        for (int i = 0; i < kFadersPerLayer; ++i)
+        const int first = layer * fadersPorLayer;
+        for (int i = 0; i < fadersPorLayer; ++i)
         {
             const int g = first + i;
             if (g >= engine.mixer.numChannels()) break;
@@ -544,23 +558,44 @@ private:
 
     /** Passa para a proxima pagina. Canal aberto nao troca de fonte: fica
         pendente, mesma regra do carregamento de cena. */
-    void nextPage()
+    /** Menu com os snapshots, em vez de ciclar um a um.
+
+        Ciclar obriga a passar por todas para chegar na que se quer, e no ar
+        cada passagem REARRUMA a superficie inteira - o operador ve os faders
+        mudando tres vezes para chegar onde queria. Mesa boa vai direto: a
+        lista abre, ele escolhe, acabou. */
+    void abrePaginas()
     {
         auto& ps = settings.pages;
         if (ps.pages.empty())
         {
-            log ("nenhuma pagina cadastrada (Configuracoes > Paginas)");
+            log ("nenhum snapshot guardado (Configuracoes > Snapshots)");
             return;
         }
-        ps.active = (ps.active + 1) % int (ps.pages.size());
+
+        juce::PopupMenu menu;
+        for (size_t i = 0; i < ps.pages.size(); ++i)
+            menu.addItem (int (i) + 1, ps.pages[i].name,
+                          true, int (i) == ps.active);   // a ativa vem marcada
+
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (pageButton),
+                            [this] (int escolha)
+                            { if (escolha > 0) aplicaPagina (escolha - 1); });
+    }
+
+    void aplicaPagina (int indice)
+    {
+        auto& ps = settings.pages;
+        if (indice < 0 || indice >= int (ps.pages.size())) return;
+        ps.active = indice;
 
         std::vector<int> pending;
         const int n = mesa::applyPage (ps.pages[size_t (ps.active)], settings.catalog,
                                        engine.mixer, &pending);
         updatePageButton();
 
-        log ("pagina: " + juce::String (ps.pages[size_t (ps.active)].name)
-             + (n > 0 ? "  |  " + juce::String (n) + " fader(es) no ar, pendente(s)" : ""));
+        log ("recall: " + juce::String (ps.pages[size_t (ps.active)].name)
+             + (n > 0 ? "  |  " + juce::String (n) + " fader(es) em recall safe (no ar)" : ""));
         for (auto* s : strips) s->refresh();
     }
 
@@ -568,8 +603,8 @@ private:
     {
         auto& ps = settings.pages;
         pageButton.setButtonText (ps.pages.empty()
-            ? "PAGINA: --"
-            : "PAGINA: " + juce::String (ps.pages[size_t (juce::jlimit (0, int (ps.pages.size()) - 1, ps.active))].name));
+            ? "SNAPSHOT: --"
+            : "SNAPSHOT: " + juce::String (ps.pages[size_t (juce::jlimit (0, int (ps.pages.size()) - 1, ps.active))].name));
     }
 
     void openDeviceWindow()
@@ -588,6 +623,10 @@ private:
             log ("placa do Livewire: " + ip + " (deduzida da varredura)");
             rebindNetwork();
         };
+        // o gerador muda de destino com a mesa rodando: as saidas de rede tem
+        // de saber na hora, nao so no proximo SALVAR E APLICAR
+        cfg->onDestinoDoTeste = [this] { rebindNetwork(); };
+
         // avisa tambem ao arrancar: quem herda uma configuracao pronta nunca
         // abre a aba onde o aviso aparece
         if (const auto c = mesa::conflitosDeSaida (settings); ! c.empty())
@@ -992,7 +1031,7 @@ private:
             const auto tap = mesa::TapPoint (ch.params.trigger.source.load());
             log ("CH" + juce::String (i + 1) + "  trigger -> "
                  + mesa::triggerStateName (mesa::TriggerState (st))
-                 + "   (nivel " + juce::String (ch.tapDb (tap), 1)
+                 + "   (nivel " + juce::String (ch.nivelParaGatilho (tap), 1)
                  + " / threshold " + juce::String (ch.params.trigger.thresholdDb.load(), 1)
                  + " dBFS)");
         }
@@ -1117,8 +1156,29 @@ private:
         fader na mao e o tipo de detalhe que faz o operador achar que a funcao
         esta quebrada. Cuidado ao ampliar isto: fader, ON/OFF, bus e CUE sao do
         operador e NAO podem ser sobrescritos pelo catalogo. */
+    /** O Input trim gain pertence a ENTRADA, nao ao fader.
+
+        Ajustar o trim e casar o nivel DAQUELA FONTE com o da mesa - vale para
+        qualquer fader que a carregue, e tem de continuar valendo depois de
+        trocar a fonte de lugar. Mexer no SOFT do canal escrevia so na copia do
+        canal: bastava recarregar o input para o ajuste sumir. */
+    void trimDoCanalVoltaParaOInput()
+    {
+        for (int i = 0; i < engine.mixer.numChannels(); ++i)
+        {
+            auto& ch = engine.mixer.channel (i);
+            if (auto* def = settings.catalog.find (ch.name))
+            {
+                const float noCanal = ch.params.trimDb.load();
+                if (std::abs (noCanal - def->trimDb) > 0.01f) def->trimDb = noCanal;
+            }
+        }
+    }
+
     void sincronizaDoCatalogo()
     {
+        trimDoCanalVoltaParaOInput();
+
         for (int i = 0; i < engine.mixer.numChannels(); ++i)
         {
             auto& ch = engine.mixer.channel (i);
@@ -1145,6 +1205,23 @@ private:
                 // de um Livewire desligado.
                 ch.params.inputKind .store (def->kind);
                 ch.params.inputIndex.store (nada ? -1 : def->index);
+
+                // E A SEGUNDA PONTA JUNTO.
+                //
+                // Sem isto, marcar "entrada de linha estereo" gravava a
+                // escolha e nao chegava ao canal ja carregado: ele seguia mono
+                // ate a fonte ser recarregada no fader. As duas colunas do
+                // medidor andavam iguais e parecia que o par nao funcionava.
+                //
+                // A conta e a mesma do loadSource: em placa a direita e a
+                // entrada seguinte; em rede vem do slot que o religamento
+                // atribuiu.
+                const int direita =
+                    nada ? -1
+                         : (def->kind == int (mesa::InputKind::Device) && def->deviceEstereo)
+                               ? def->deviceIndexR
+                               : def->indexR;
+                ch.params.inputIndexR.store (direita);
             }
             else
                 ch.params.semFonte.store (! ch.name.empty());
@@ -1232,20 +1309,21 @@ private:
         rebindOutputs so cuida de destinos de REDE, e quem manda o audio para a
         placa e o roteamento por barramento. Resultado: escolher a saida
         funcionava na hora — porque a tela tambem mexia no motor — e sumia ao
-        reabrir, quando so o roteamento antigo era aplicado. */
-    void aplicaSaidasDaPlaca()
-    {
-        for (const auto& o : settings.outputs.outputs)
-        {
-            if (o.kind == int (mesa::InputKind::Network)) continue;
-            if (o.pair < 0) continue;
-            if (o.busSource < 0 || o.busSource >= mesa::kNumBuses) continue;
+        reabrir, quando so o roteamento antigo era aplicado.
 
-            settings.routing.busOutputPair[o.busSource] = o.pair;
-            settings.routing.busGainDb[o.busSource]     = o.ganhoDb;
-        }
-        mesa::applyRouting (settings, engine.mixer);
-    }
+        DUAS FALHAS QUE SOBRARAM DAQUELA CORRECAO, e que esta versao resolve:
+
+        1. So sabia LIGAR, nunca DESLIGAR. Tirar a placa de um destino nao
+           mudava nada: a saida sem par caia no "continue" e o roteamento
+           antigo continuava valendo, inclusive depois de reabrir a mesa. Agora
+           a lista e a unica verdade — o que nao esta nela nao sai.
+
+        2. So enxergava os quatro PGM. Destino apontado para monitor, fone, CUE
+           ou estudio era ignorado em silencio, porque esses nao sao
+           barramentos e moram noutros campos do roteamento. Era exatamente o
+           caso de mover uma placa do PGM 1 para o monitor: saia do primeiro
+           lugar nenhum e nao chegava no segundo. */
+    void aplicaSaidasDaPlaca() { mesa::aplicaSaidasDaPlaca (settings, engine.mixer); }
 
     void rebindNetwork()
     {
@@ -1277,7 +1355,22 @@ private:
 
         const double sr = engine.sampleRate.load();
         const int    bl = juce::jmax (32, engine.blockSize.load());
+        hub->ndiLatenciaMs = double (juce::jlimit (5, 200, settings.ndiLatenciaMs));
+        NdiEngine::instance().usaConvencaoNdi (settings.ndiConvencao);
         hub->rebind        (settings.catalog, sr, bl);
+        // Gerador de teste: quem e o destino, e por que caminho ele sai.
+        hub->destinoDoTeste = settings.testeDestino;
+        engine.mixer.teste.tipo   .store (settings.testeTipo);
+        engine.mixer.teste.nivelDb.store (settings.testeNivelDb);
+
+        int parDoTeste = -1;
+        for (const auto& o : settings.outputs.outputs)
+            if (! settings.testeDestino.empty() && o.name == settings.testeDestino
+                && o.deviceName.empty() && o.livewireChannel <= 0 && o.streamName.empty())
+                parDoTeste = o.pair;
+        engine.mixer.testePar.store (parDoTeste);
+        engine.mixer.testeBus.store (settings.testeBus);
+
         hub->rebindOutputs (settings.outputs, settings.catalog, sr, bl);
 
         // DEPOIS de os transmissores existirem.
@@ -1403,7 +1496,7 @@ private:
         const int n = engine.mixer.numChannels();
         for (int i = 0; i < strips.size(); ++i)
         {
-            const int g = layer * kFadersPerLayer + i;
+            const int g = layer * fadersPorLayer + i;
             if (g < n)
             {
                 strips[i]->setTriggerState (engine.automation.stateOf (g));
@@ -1411,7 +1504,7 @@ private:
                 strips[i]->setOnAir (cam > 0 && cam == engine.automation.camera());
             }
             strips[i]->setGravando (gravador.estaGravando()
-                                    && engine.canalGravado.load() == layer * kFadersPerLayer + i);
+                                    && engine.canalGravado.load() == layer * fadersPorLayer + i);
             strips[i]->refresh();
         }
 
@@ -1452,6 +1545,11 @@ private:
         engine.mixer.automation.wideCamera.store (5);
     }
 
+    /** Faders por layer desta abertura. Declarado antes do engine para bater
+        com a ordem da lista do construtor: membros nascem na ordem em que sao
+        declarados, e lista fora dessa ordem e aviso de compilador e armadilha
+        para quem mexer depois. */
+    const int fadersPorLayer;
     AudioEngine engine;
     MeterBridge bridge;
     mesa::Settings settings;

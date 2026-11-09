@@ -1,11 +1,20 @@
 #pragma once
 #include "Channel.h"
+#include "GeradorTeste.h"
 #include <memory>
 #include <algorithm>
 
 namespace mesa {
 
 constexpr int kNumBuses = 4;   // PGM 1..4
+
+/** Qual barramento e o de COMUNICACAO com telefones e externas.
+
+    Ele e diferente dos outros tres: recebe o canal mesmo fechado, para dar
+    para falar com o ouvinte antes de por no ar. PGM 4, que e a convencao da
+    Axia e o que o operador ja espera - na tira ele aparece marcado com um
+    telefone. */
+constexpr int kBusComunicacao = 3;
 
 struct AutomationParams
 {
@@ -40,6 +49,17 @@ struct BusParams
 {
     std::atomic<float> gainDb     { 0.0f };
     std::atomic<int>   outputPair { -1 };   // par de saidas do dispositivo; -1 = nao roteado
+
+    /** MAIS DE UM PAR POR BARRAMENTO.
+
+        Era um par so. Quem criava duas saidas levando o mesmo PGM para pares
+        diferentes - PGM 1 em 3/4 E em 5/6, o que e absolutamente comum: um
+        para o processador, outro para o gravador - via a ultima da lista
+        sobrescrever a anterior, e o primeiro par ficava mudo sem nenhum aviso.
+
+        Um bit por par. O campo acima continua existindo para quem so precisa
+        de um e para as configuracoes ja gravadas. */
+    std::atomic<unsigned> outputPairMask { 0 };
 };
 
 enum class MonitorSource { Pgm1 = 0, Pgm2, Pgm3, Pgm4, Ext1, Ext2 };
@@ -81,6 +101,7 @@ public:
     void prepare (double sampleRate, int maxBlockSize, int numChannels)
     {
         sr = sampleRate; maxBlock = maxBlockSize;
+        teste.prepare (sampleRate, maxBlockSize);
 
         // Trocar de dispositivo (ou de sample rate) NAO pode destruir os canais:
         // a cena carregada se perderia e qualquer referencia guardada pela
@@ -104,8 +125,10 @@ public:
         {
             busL[b].assign (size_t (maxBlockSize), 0.0f);
             busR[b].assign (size_t (maxBlockSize), 0.0f);
-            busMeter[b].prepare (sampleRate);
+            busMeter [b].prepare (sampleRate);
+            busMeterR[b].prepare (sampleRate);
             busParams[b].outputPair.store (b);
+            busParams[b].outputPairMask.store (0);
         }
         for (auto* v : { &cueL, &cueR, &monL, &monR, &phL, &phR, &stL, &stR, &talkBus })
             v->assign (size_t (maxBlockSize), 0.0f);
@@ -152,6 +175,13 @@ public:
     {
         clear (n);
 
+        // O bloco de teste nasce aqui, no comeco, porque tres consumidores o
+        // querem em momentos diferentes do ciclo: o barramento (antes dos
+        // medidores), o par da placa (no fim) e as saidas de rede (depois que
+        // o mixer terminou). Gerar uma vez so mantem os tres com o MESMO sinal
+        // - senao a fase diferiria entre destinos e a calibracao mentiria.
+        teste.processa (n);
+
         bool crMicOpen = false, studioMicOpen = false, cueActive = false;
 
         for (auto& chPtr : channels)
@@ -160,12 +190,27 @@ public:
             const int idx  = ch.params.inputIndex.load (std::memory_order_relaxed);
             const int kind = ch.params.inputKind .load (std::memory_order_relaxed);
             const float* src = nullptr;
-            if (kind == int (InputKind::Network))
+            if (kind == int (InputKind::Gerador))
+                src = teste.ultimoBloco();     // ja gerado no comeco do ciclo
+            else if (kind == int (InputKind::Network))
                 src = (net != nullptr && idx >= 0 && idx < numNet) ? net[idx] : nullptr;
             else
                 src = (idx >= 0 && idx < numIn) ? in[idx] : nullptr;
-            const float* sig = ch.process (src, n);
-            const float* pre = ch.preFaderData();
+            // segunda ponta de uma fonte ESTEREO
+            const int idxR = ch.params.inputIndexR.load (std::memory_order_relaxed);
+            const float* srcR = nullptr;
+            if (idxR >= 0)
+            {
+                if (kind == int (InputKind::Network))
+                    srcR = (net != nullptr && idxR < numNet) ? net[idxR] : nullptr;
+                else
+                    srcR = (idxR < numIn) ? in[idxR] : nullptr;
+            }
+
+            const float* sig  = ch.process (src, srcR, n);
+            const float* sigR = ch.processedDataR();
+            const float* pre  = ch.preFaderData();
+            const float* preR = ch.preFaderDataR();
 
             const int type = ch.params.sourceType.load (std::memory_order_relaxed);
             if (ch.isMicOpen())
@@ -190,19 +235,31 @@ public:
             const float gl = p <= 0.0f ? 1.0f : 1.0f - p;
             const float gr = p >= 0.0f ? 1.0f : 1.0f + p;
 
+            // O BARRAMENTO DE COMUNICACAO NAO OBEDECE AO ON/OFF.
+            //
+            // Ele existe para falar com quem esta do outro lado da linha antes
+            // de por no ar. Se so recebesse canal aberto, para falar com o
+            // ouvinte seria preciso entrar no ar primeiro. Os outros tres
+            // barramentos continuam sendo o que sempre foram: so o que esta no
+            // ar entra neles.
+            const float* com  = ch.comunicData();
+            const float* comR = ch.comunicDataR();
             const unsigned mask = ch.params.busMask.load (std::memory_order_relaxed);
             for (int b = 0; b < kNumBuses; ++b)
             {
                 if ((mask & (1u << b)) == 0) continue;
+                const bool ehCom = (b == kBusComunicacao);
+                const float* sL = ehCom ? com  : sig;
+                const float* sR = ehCom ? comR : sigR;
                 float* dl = busL[b].data(); float* dr = busR[b].data();
-                for (int i = 0; i < n; ++i) { dl[i] += sig[i] * gl; dr[i] += sig[i] * gr; }
+                for (int i = 0; i < n; ++i) { dl[i] += sL[i] * gl; dr[i] += sR[i] * gr; }
             }
 
             // CUE e PFL: pre-fader e independente do ON/OFF
             if (ch.params.cue.load (std::memory_order_relaxed))
             {
                 cueActive = true;
-                for (int i = 0; i < n; ++i) { cueL[size_t (i)] += pre[i] * gl; cueR[size_t (i)] += pre[i] * gr; }
+                for (int i = 0; i < n; ++i) { cueL[size_t (i)] += pre[i] * gl; cueR[size_t (i)] += preR[i] * gr; }
             }
         }
 
@@ -215,6 +272,30 @@ public:
             busR[0][size_t (i)] *= g;
         }
 
+        // GERADOR DIRETO NO BARRAMENTO.
+        //
+        // Antes so alcancava uma saida, e a barra de programa la em cima nao
+        // mostrava nada - justo a regua em que se le nivel. Entrando no
+        // barramento, o tom passa pelo medidor, pelo monitor, pelo CUE e por
+        // toda saida que leve aquele PGM: da para calibrar olhando a mesma
+        // barra que se olha no ar.
+        //
+        // TOMA o barramento, nao soma. Somar tom ao programa daria medida sem
+        // valor e ainda poria tom no ar junto com a musica. E por isso este
+        // destino e o mais perigoso dos dois: escolher PGM 1 CALA O PROGRAMA.
+        {
+            const int bt = testeBus.load (std::memory_order_relaxed);
+            if (teste.ativo.load (std::memory_order_relaxed) && bt >= 0 && bt < kNumBuses)
+            {
+                const float* tom = teste.ultimoBloco();
+                for (int i = 0; i < n; ++i)
+                {
+                    busL[bt][size_t (i)] = tom[i];
+                    busR[bt][size_t (i)] = tom[i];
+                }
+            }
+        }
+
         buildBackfeeds (n);
         buildMonitors (in, numIn, n, crMicOpen, studioMicOpen, cueActive);
 
@@ -222,6 +303,12 @@ public:
         for (int b = 0; b < kNumBuses; ++b)
         {
             const float bg = dbToGain (busParams[b].gainDb.load (std::memory_order_relaxed));
+            // todos os pares que este barramento alimenta, nao so o primeiro
+            const unsigned mascara = busParams[b].outputPairMask.load (std::memory_order_relaxed);
+            for (int par = 0; par < 16; ++par)
+                if ((mascara & (1u << par)) != 0)
+                    writePair (out, numOut, par, busL[b].data(), busR[b].data(), n, bg);
+
             writePair (out, numOut, busParams[b].outputPair.load (std::memory_order_relaxed),
                        busL[b].data(), busR[b].data(), n, bg);
         }
@@ -229,6 +316,20 @@ public:
         writePair (out, numOut, monitor.phonesPair .load(), phL.data(), phR.data(), n, 1.0f);
         writePair (out, numOut, monitor.studioPair .load(), stL.data(), stR.data(), n, 1.0f);
         writePair (out, numOut, monitor.cuePair    .load(), cueL.data(), cueR.data(), n, 1.0f);
+
+        // GERADOR DE TESTE: sobrescreve o destino, nao soma.
+        //
+        // Calibrar e comparar um sinal CONHECIDO com o que chega do outro
+        // lado. Somar o tom ao programa daria uma medida que nao vale nada, e
+        // ainda poria tom no ar junto com a musica. Quem liga isto quer o
+        // destino tomado - e por isso ele fica desligado de fabrica e some
+        // sozinho ao fechar a mesa.
+        if (teste.ativo.load (std::memory_order_relaxed))
+        {
+            const int par = testePar.load (std::memory_order_relaxed);
+            const float* tom = teste.ultimoBloco();
+            if (par >= 0) writePair (out, numOut, par, tom, tom, n, 1.0f);
+        }
 
         // backfeeds saem em mono, um por canal que precisa
         for (int i = 0; i < int (channels.size()); ++i)
@@ -241,7 +342,12 @@ public:
             if (ri < numOut && out[ri] != nullptr) for (int k = 0; k < n; ++k) out[ri][k] = b[k];
         }
 
-        for (int b = 0; b < kNumBuses; ++b) busMeter[b].process (busL[b].data(), n);
+        // os dois lados, para a barra de programa mostrar estereo
+        for (int b = 0; b < kNumBuses; ++b)
+        {
+            busMeter [b].process (busL[b].data(), n);
+            busMeterR[b].process (busR[b].data(), n);
+        }
         masterMeterL.process (busL[0].data(), n);
         masterMeterR.process (busR[0].data(), n);
         cueMeter    .process (cueL.data(), n);
@@ -265,6 +371,7 @@ public:
     const float* backfeedData (int ch) const noexcept { return backfeed[size_t (ch)].data(); }
 
     Meter busMeter[kNumBuses];
+    Meter busMeterR[kNumBuses];
     Meter masterMeterL, masterMeterR, cueMeter, monitorMeter;
 
     /** Estado que a superficie mostra em lampada: monitor mudo, CUE ativo. */
@@ -291,20 +398,31 @@ private:
             auto& ch = *channels[size_t (i)];
             float* dst = backfeed[size_t (i)].data();
 
-            if (! needsMixMinus (ch.params.sourceType.load (std::memory_order_relaxed))
-                || ch.params.feedOutputPair.load (std::memory_order_relaxed) < 0)
-            {
-                std::fill (dst, dst + n, 0.0f);
-                continue;
-            }
+            // Monta para TODO canal, sempre.
+            //
+            // Antes so montava para telefone/codec/estudio E com par de saida
+            // apontado. Quem pendurasse o mix-minus numa saida Livewire — que
+            // nao usa par de placa — recebia silencio, sem nada na tela
+            // dizendo por que. Um buffer mono por canal e barato; surpresa em
+            // operacao nao e.
 
-            const int fs = ch.params.feedSource.load (std::memory_order_relaxed);
-            const int bus = (fs >= 1 && fs <= kNumBuses) ? fs - 1 : 0;
+            // A FONTE ALTERNA SOZINHA com o ON/OFF do canal.
+            const bool ligado = ch.params.on.load (std::memory_order_relaxed);
+            const int pedido = ligado ? ch.params.feedBusOn .load (std::memory_order_relaxed)
+                                      : ch.params.feedBusOff.load (std::memory_order_relaxed);
+            const int bus = (pedido >= 0 && pedido < kNumBuses) ? pedido : 0;
 
             const unsigned mask = ch.params.busMask.load (std::memory_order_relaxed);
-            const bool contributes = (mask & (1u << bus)) != 0
-                                   && ch.params.on.load (std::memory_order_relaxed);
-            const float* own = ch.processedData();
+
+            // O que subtrair e o MESMO sinal que este canal pos no barramento.
+            // No de comunicacao isso vale mesmo com o canal fechado, porque la
+            // ele entra de qualquer jeito — e se a propria voz nao sair da
+            // conta, o interlocutor se ouve de volta justamente na conversa
+            // fora do ar.
+            const bool ehComunic = (bus == kBusComunicacao);
+            const bool contributes = (mask & (1u << bus)) != 0 && (ligado || ehComunic);
+            const float* own  = ehComunic ? ch.comunicData()  : ch.processedData();
+            const float* ownR = ehComunic ? ch.comunicDataR() : ch.processedDataR();
 
             // PAN COM UNIDADE NO CENTRO.
             //
@@ -330,7 +448,7 @@ private:
             {
                 float mix = 0.5f * (busL[bus][size_t (k)] + busR[bus][size_t (k)]);
                 if (contributes)
-                    mix -= 0.5f * (own[k] * gl + own[k] * gr) * masterG;   // tira o proprio sinal
+                    mix -= 0.5f * (own[k] * gl + ownR[k] * gr) * masterG;   // tira o proprio sinal
                 dst[k] = mix * dim + (talking ? talkBus[size_t (k)] : 0.0f);
             }
         }
@@ -441,6 +559,20 @@ private:
     /** Nivel da saida aplicado ao CUE: e o fader da direita, sem o dim. */
     SmoothedGain monCueGain, phCueGain, stCueGain;
     double sr = 48000.0; int maxBlock = 512;
+
+public:
+    /** Gerador de sinal de teste e o par da placa mestra para onde ele vai.
+        -1 = nenhum par; um destino de rede se resolve no AudioEngine. */
+    GeradorTeste teste;
+    /** Par da placa mestra que o gerador toma. -1 = nenhum. */
+    std::atomic<int> testePar { -1 };
+    /** Barramento que o gerador toma, para aparecer no medidor de programa.
+        -1 = nenhum. CUIDADO: toma o barramento inteiro. */
+    std::atomic<int> testeBus { -1 };
+
+    /** Sinal de teste do bloco que acabou de ser gerado, para quem sai por
+        outro caminho que nao o par da placa - rede e placa secundaria. */
+    const float* sinalDeTeste() const noexcept { return teste.ultimoBloco(); }
 };
 
 } // namespace mesa

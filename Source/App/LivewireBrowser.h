@@ -3,6 +3,7 @@
  #include <winsock2.h>
  #include <ws2tcpip.h>
 #endif
+#include "../Core/AnuncioLw.h"
 #include "../Core/NomeDaThread.h"
 #include <juce_core/juce_core.h>
 #include <atomic>
@@ -18,12 +19,13 @@
     Por isso ela mostra tambem o "PC 1@DESKTOP" do driver da Axia, que o LWRP
     do no nao conhece — o LWRP so sabe das fontes DAQUELE no.
 
-    Ressalva importante: o formato do anuncio e proprietario e nao publicado.
-    O que fazemos aqui e reconhecer o que da para reconhecer com seguranca —
-    textos legiveis e numeros de canal plausiveis — e guardar os bytes crus dos
-    primeiros pacotes para afinar depois. Preferi isso a fingir que entendo o
-    formato inteiro: leitura errada de nome de fonte no ar e pior que lista
-    incompleta. */
+    O formato e proprietario e nao publicado, mas foi decifrado por captura e
+    mora em Core/AnuncioLw.h, com a suite conferindo. Este ouvinte le os campos
+    de verdade - PSID, PSNM, ATRN - em vez de adivinhar por texto solto.
+
+    Vantagem pratica: aparece TUDO que anuncia, inclusive equipamento que nao
+    atende LWRP na porta 93. A varredura por LWRP so enxerga quem responde
+    naquela porta, e nem a propria mesa responde. */
 class LivewireBrowser
 {
 public:
@@ -135,69 +137,51 @@ private:
         }
     }
 
-    /** Extrai nomes legiveis e numeros de canal plausiveis.
+    /** Le o anuncio DE VERDADE, com o decodificador do core.
 
-        Heuristica, e assumida como tal: procura sequencias de texto imprimivel
-        e, perto delas, inteiros que caibam na faixa de canal do Livewire
-        (1..32767). Nomes de fonte no Livewire costumam vir como texto puro no
-        pacote — foi o que permitiu montar a lista sem a especificacao. */
+        Antes isto era heuristica: procurava trechos de texto imprimivel e, por
+        perto, inteiros que coubessem na faixa de canal. Funcionava para muita
+        coisa, mas perdia fontes - e perdia justamente as que importavam. O
+        painel do QOR listava as NOTE e os LV-DECK de outra maquina e a mesa
+        nao; nem as proprias saidas dela apareciam.
+
+        O nome tambem saia torto: a heuristica ficava com o texto MAIS LONGO
+        perto do numero, e num ADVT 1 o texto mais longo e o nome da MAQUINA
+        (ATRN, 32 bytes), nao o da fonte (PSNM, 16). Por isso "PGM 01 - GRAVA"
+        e "@QOR" apareciam colados de um jeito e "@lwwd" de outro.
+
+        Agora sao os campos: PSID da o canal, PSNM da o nome, ATRN da a maquina.
+        E o que nao decodificar e descartado em silencio - lista incompleta
+        incomoda, nome errado no ar engana. */
     void interpreta (const char* dados, int n, const juce::String& de)
     {
-        const auto* b = reinterpret_cast<const unsigned char*> (dados);
+        const auto a = mesa::lw::le (reinterpret_cast<const std::uint8_t*> (dados),
+                                     size_t (n));
+        if (! a.ok || a.fontes.empty()) return;
 
-        // 1) todos os trechos de texto imprimivel com 3 ou mais caracteres
-        std::vector<std::pair<int, juce::String>> textos;
-        juce::String atual;
-        int inicio = 0;
-        for (int i = 0; i < n; ++i)
-        {
-            const unsigned char c = b[i];
-            const bool imprimivel = (c >= 32 && c < 127);
-            if (imprimivel)
-            {
-                if (atual.isEmpty()) inicio = i;
-                atual += juce::String::charToString (juce::juce_wchar (c));
-            }
-            else
-            {
-                if (atual.length() >= 3) textos.push_back ({ inicio, atual });
-                atual.clear();
-            }
-        }
-        if (atual.length() >= 3) textos.push_back ({ inicio, atual });
+        // So o ADVT 1 traz nomes. O 2 e sinal de vida e o 3 e estado de uso:
+        // aceitar os tres apagaria os nomes a cada segundo.
+        if (a.advt != 1) return;
 
-        // 2) inteiros de 32 e 16 bits que caibam na faixa de canal
-        auto canalPerto = [&] (int posTexto) -> int
-        {
-            for (int i = juce::jmax (0, posTexto - 12); i + 4 <= n && i < posTexto + 4; ++i)
-            {
-                const int v32 = (int (b[i]) << 24) | (int (b[i+1]) << 16)
-                              | (int (b[i+2]) << 8) | int (b[i+3]);
-                if (v32 > 0 && v32 <= 32767) return v32;
-                const int v16 = (int (b[i]) << 8) | int (b[i+1]);
-                if (v16 > 0 && v16 <= 32767) return v16;
-            }
-            return 0;
-        };
-
+        const juce::String maquina (a.maquina.c_str());
         const double agora = juce::Time::getMillisecondCounterHiRes();
         std::lock_guard<std::mutex> g (mutex);
 
-        for (const auto& t : textos)
+        for (const auto& f : a.fontes)
         {
-            // descarta o que claramente nao e nome de fonte
-            if (t.second.startsWithIgnoreCase ("http")) continue;
-            if (t.second.containsOnly ("0123456789.")) continue;
+            if (f.canal <= 0) continue;
 
-            const int canal = canalPerto (t.first);
-            if (canal <= 0) continue;
+            auto& d = achadas[f.canal];
+            d.canal = f.canal;
 
-            auto& f = achadas[canal];
-            f.canal = canal;
-            if (f.nome.isEmpty() || t.second.length() > f.nome.length())
-                f.nome = t.second.trim();
-            f.origem = de;
-            f.vistoMs = agora;
+            juce::String nome (f.nome.c_str());
+            nome = nome.trim();
+            if (nome.isEmpty()) nome = "canal " + juce::String (f.canal);
+            if (maquina.isNotEmpty()) nome += " @" + maquina;
+
+            d.nome   = nome;
+            d.origem = de;
+            d.vistoMs = agora;
         }
     }
 

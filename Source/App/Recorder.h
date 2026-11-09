@@ -79,10 +79,15 @@ public:
         if (! gravando.load (std::memory_order_relaxed)
             || pausado.load (std::memory_order_relaxed) || fila.empty()) return;
 
+        // Indices de 64 bits pelo mesmo motivo do RingBuffer: eles so crescem,
+        // e um int com sinal a 48000 por segundo vira negativo em 745 minutos.
+        // Negativo dentro do modulo escreve fora do buffer. Aqui so corre
+        // enquanto grava, mas gravacao de madrugada inteira e justamente o que
+        // esta mesa faz.
         const int cap = int (fila.size());
-        const int w = escrita.load (std::memory_order_relaxed);
-        const int r = leitura.load (std::memory_order_acquire);
-        const int livre = cap - (w - r) - 1;
+        const long long w = escrita.load (std::memory_order_relaxed);
+        const long long r = leitura.load (std::memory_order_acquire);
+        const int livre = cap - int (w - r) - 1;
 
         if (livre < n) { perdidas.fetch_add (n, std::memory_order_relaxed); return; }
 
@@ -111,9 +116,9 @@ private:
         while (! sair.load())
         {
             const int cap = int (fila.size());
-            const int w = escrita.load (std::memory_order_acquire);
-            int r = leitura.load (std::memory_order_relaxed);
-            int disponivel = w - r;
+            const long long w = escrita.load (std::memory_order_acquire);
+            const long long r = leitura.load (std::memory_order_relaxed);
+            const int disponivel = int (w - r);
 
             if (disponivel <= 0)
             {
@@ -142,7 +147,8 @@ private:
     std::thread worker;
     std::atomic<bool> gravando { false }, sair { true }, pausado { false };
     std::vector<float> fila;
-    std::atomic<int> escrita { 0 }, leitura { 0 }, perdidas { 0 }, gravadas { 0 };
+    std::atomic<long long> escrita { 0 }, leitura { 0 }, gravadas { 0 };
+    std::atomic<int> perdidas { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Recorder)
 };

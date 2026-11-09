@@ -1,6 +1,7 @@
 #pragma once
 #include "Channel.h"
 #include "MixerEngine.h"
+#include "Scene.h"
 #include "Json.h"
 #include <string>
 #include <vector>
@@ -22,6 +23,9 @@ struct SourceDef
     std::string name;                    // "MIC 1 APRES", "PLAYOUT A", "TEL VX 1"
     int  kind = int (InputKind::Device); // placa ASIO | rede
     int  index = -1;                     // entrada da placa, quando kind = Device
+    /** Slot da segunda ponta, quando a fonte e ESTEREO. -1 = mono. Como o
+        index, vale so em execucao: quem manda e o que a rede entregou agora. */
+    int  indexR = -1;
     std::string streamName;              // nome NDI exato, quando vem por NDI
     /** Placa SECUNDARIA: gravamos o NOME do dispositivo, nao so o indice da
         entrada. Com duas placas, "entrada 3" e ambiguo, e um settings.json
@@ -36,7 +40,13 @@ struct SourceDef
         que sobrevive: IP muda, canal pode ser remapeado, nome fica. Tambem
         evita que a lista mostre "(fora da lista)" antes da primeira varredura. */
     std::string livewireNome;
-    int  livewireSide = 0;               // 0 = esquerdo, 1 = direito, 2 = soma
+    /** 0 = esquerdo, 1 = direito, 2 = soma (L+R)/2 em mono, 3 = ESTEREO.
+
+        Um stream Livewire e sempre estereo. Como o canal desta mesa e mono com
+        pan, alguem tem de decidir o que fazer com as duas pontas. Em 3 o canal
+        passa a carregar as duas de verdade, cada uma no seu lado do
+        barramento, e o pan vira balanco. */
+    int  livewireSide = 0;
 
     /** GPIO: qual porta e pino do no acompanham o ON/OFF deste canal.
         Zero desliga. E o que acende a luz de ar e fecha o rele. */
@@ -51,6 +61,27 @@ struct SourceDef
     int  type = int (SourceType::Line);  // define mute de monitor e mix-minus
 
     float trimDb = 0.0f;
+    float atrasoMs = 0.0f;           // sync com video, por fonte
+    bool  onVaiParaZero = false;     // ligar o canal poe o fader em 0 dB
+
+    /** CANAL ESTEREO com duas entradas da placa.
+
+        A placa entrega as entradas uma a uma, mas linha e estereo: um toca-
+        discos, um playout, um retorno de PC ocupam dois conectores. Sem isto
+        sobrava carregar os dois em faders separados e casar fader, pan e ON de
+        cada um na mao - trabalhoso e facil de errar no ar.
+
+        As duas entradas sao escolhidas SEPARADAMENTE, e nao "esta e a
+        seguinte". Placa nao garante que o par de um aparelho caia em conectores
+        vizinhos, e quem remaneja cabo no rack nao deveria ter de respeitar uma
+        regra nossa de numeracao.
+
+        Ao contrario do indexR das fontes de rede, que e atribuido a cada
+        religamento, estes sao ESCOLHA e ficam gravados: 3 e 4 continuam sendo
+        3 e 4 amanha. */
+    bool  deviceEstereo = false;
+    /** Entrada da DIREITA na placa. -1 = nao escolhida. A esquerda e o index. */
+    int   deviceIndexR = -1;
 
     // trigger: pertence a fonte
     bool  triggerEnabled = false;
@@ -71,7 +102,8 @@ struct SourceDef
     int  logicTarget = 0;
 
     // mix-minus
-    int   feedSource = 0;
+    int   feedBusOn  = 0;
+    int   feedBusOff = 3;
     int   feedOutputPair = -1;
     float feedDimDb = -10.0f;
 };
@@ -112,13 +144,55 @@ struct SourceCatalog
 
 /** Carrega a fonte no fader. NAO mexe em fader, ON/OFF, bus nem CUE — isso e
     do operador, nao da fonte. */
+/** Chave que identifica a FILA de uma fonte, para reaproveita-la entre
+    religamentos em vez de recriar receptor a cada mudanca de catalogo. */
+inline std::string chaveDaFonte (const SourceDef& s)
+{
+    if (s.livewireChannel > 0)
+        return "lw:" + std::to_string (s.livewireChannel) + ":"
+             + std::to_string (s.livewireSide);
+    if (! s.streamName.empty()) return "ndi:" + s.streamName;
+    if (! s.deviceName.empty()) return "dev:" + s.deviceName + ":"
+                                     + std::to_string (s.deviceChannel);
+    return {};
+}
+
+/** Comeco de toda chave de um canal Livewire, qualquer que seja o lado.
+
+    Existe por causa de um defeito caro: a limpeza dos receptores listava os
+    lados na mao ("...:0", "...:1", "...:2"). Quando o lado 3 (estereo) entrou,
+    a chave dele nao batia com nenhum, o receptor recem-criado era destruido
+    como se estivesse sobrando, e o motor ficava apontando para memoria
+    liberada - a mesa caia no primeiro bloco de audio. Comparar pelo PREFIXO
+    nao depende de alguem lembrar de atualizar duas listas. */
+inline std::string prefixoLivewire (int canal)
+{
+    return "lw:" + std::to_string (canal) + ":";
+}
+
+/** A chave pertence a este canal Livewire? Vale para qualquer lado e para
+    sufixos como "/R", usado pela segunda ponta de uma fonte estereo. */
+inline bool chaveEhDoCanal (const std::string& chave, int canal)
+{
+    const std::string pref = prefixoLivewire (canal);
+    return chave.size() >= pref.size()
+        && chave.compare (0, pref.size(), pref) == 0;
+}
+
 inline void loadSource (const SourceDef& s, Channel& ch)
 {
     ch.name = s.name;
     ch.params.inputKind .store (s.kind);
-    ch.params.inputIndex.store (s.index);   // slot assincrono quando kind = Network
+    ch.params.inputIndex .store (s.index);   // slot assincrono quando kind = Network
+    // Em placa, a segunda ponta e o canal seguinte e sai da escolha gravada;
+    // em rede, vem do slot que o religamento atribuiu.
+    ch.params.inputIndexR.store (
+        (s.kind == int (InputKind::Device) && s.deviceEstereo)
+            ? s.deviceIndexR : s.indexR);
     ch.params.sourceType.store (s.type);
     ch.params.trimDb    .store (s.trimDb);
+    ch.params.atrasoMs  .store (s.atrasoMs);
+    ch.params.onVaiParaZero.store (s.onVaiParaZero);
 
     ch.params.trigger.enabled     .store (s.triggerEnabled);
     ch.params.trigger.source      .store (s.triggerTap);
@@ -137,7 +211,8 @@ inline void loadSource (const SourceDef& s, Channel& ch)
     ch.params.offCommand.set (s.offCommand);
     ch.params.logicTarget.store (s.logicTarget);
 
-    ch.params.feedSource    .store (s.feedSource);
+    ch.params.feedBusOn     .store (s.feedBusOn);
+    ch.params.feedBusOff    .store (s.feedBusOff);
     ch.params.feedOutputPair.store (s.feedOutputPair);
     ch.params.feedDimDb     .store (s.feedDimDb);
     ch.params.fala.enabled    .store (s.transcrever);
@@ -154,6 +229,8 @@ inline void captureSource (const Channel& ch, SourceDef& s)
     s.index      = ch.params.inputIndex.load();
     s.type       = ch.params.sourceType.load();
     s.trimDb     = ch.params.trimDb    .load();
+    s.atrasoMs   = ch.params.atrasoMs  .load();
+    s.onVaiParaZero = ch.params.onVaiParaZero.load();
 
     s.triggerEnabled = ch.params.trigger.enabled     .load();
     s.triggerTap     = ch.params.trigger.source      .load();
@@ -172,7 +249,8 @@ inline void captureSource (const Channel& ch, SourceDef& s)
     s.offCommand   = ch.params.offCommand.str();
     s.logicTarget  = ch.params.logicTarget.load();
 
-    s.feedSource     = ch.params.feedSource    .load();
+    s.feedBusOn      = ch.params.feedBusOn     .load();
+    s.feedBusOff     = ch.params.feedBusOff    .load();
     s.feedOutputPair = ch.params.feedOutputPair.load();
     s.feedDimDb      = ch.params.feedDimDb     .load();
     s.transcrever    = ch.params.fala.enabled    .load();
@@ -215,6 +293,18 @@ struct OutputDef
         lados, sem pan: pan e coisa de mistura, e direct out existe justamente
         para escapar dela. */
     std::string directSource;
+
+    /** MIX-MINUS: manda para este destino o retorno de um CANAL - o programa
+        menos a propria voz daquele canal. -1 = desligado.
+
+        Aqui e por CANAL, e nao por entrada como o direct out, porque mix-minus
+        depende do ON/OFF: e o estado do fader que decide se o retorno leva o
+        programa ou a comunicacao. Sem fader nao existe essa pergunta.
+
+        Com isto o retorno deixa de depender do par de saida da placa
+        principal: da para mandar o mix-minus de um telefone por Livewire, que
+        e como um hibrido em rede Axia recebe o dele. */
+    int mixMinusChannel = -1;
     /** Ganho DESTA saida, em dB.
 
         Cada destino casa com um equipamento diferente: o transmissor quer um
@@ -254,6 +344,25 @@ struct FaderPage
 {
     std::string name;                 // "Jornal", "Esportes", "Madrugada"
     std::vector<std::string> slots;   // por posicao de fader
+
+    /** A PAGINA GUARDA TUDO, nao so quem fica em cada fader.
+
+        Uma pagina so com os nomes das fontes resolvia metade do problema: o
+        operador chegava na pagina certa e ainda tinha de reajustar fader, bus,
+        trim e DSP de cada canal na mao. Guardando a cena inteira, escolher a
+        pagina devolve a mesa como ela estava quando aquilo funcionou.
+
+        Continua valendo a regra que importa: canal NO AR nao troca de fonte
+        nem anda de fader. Rearrumar a mesa nunca pode calar quem esta falando,
+        e por isso a cena e aplicada com respeito ao ar. */
+    bool  guardaTudo = false;
+    Scene cena;
+
+    /** Quando foi gravada, em texto ja formatado.
+
+        Guardado como texto e nao como instante: a lista quer MOSTRAR, e nao
+        calcular. Formato fixo para ordenar por ele direto se um dia precisar. */
+    std::string gravadaEm;
 };
 
 struct PageSet
@@ -278,6 +387,21 @@ struct PageSet
 inline int applyPage (const FaderPage& page, const SourceCatalog& cat,
                       MixerEngine& mix, std::vector<int>* pendingOut = nullptr)
 {
+    // ESTADO PRIMEIRO, LAYOUT DEPOIS.
+    //
+    // Antes, snapshot com estado aplicava a cena e devolvia ali mesmo - os
+    // slots nem eram olhados. A tela deixava escolher quem fica em cada fader e
+    // aquilo nunca valia: a fonte vinha sempre da cena. Editar um campo que o
+    // programa ignora e pior que nao ter o campo.
+    //
+    // Agora a cena repoe fader, bus, trim e DSP, e em seguida o layout diz
+    // quem fica onde - o que o operador escolheu na lista ganha de quem estava
+    // ali quando o snapshot foi gravado. As duas regras de recall safe
+    // continuam valendo: applyScene pula quem esta no ar, e o laco abaixo
+    // tambem.
+    if (page.guardaTudo && ! page.cena.channels.empty())
+        applyScene (page.cena, mix, true);
+
     int pending = 0;
     const int n = mix.numChannels();
 
@@ -326,6 +450,10 @@ inline json::Value sourceToJson (const SourceDef& s)
     o.set ("deviceChannel",  json::num     (s.deviceChannel));
     o.set ("type",           json::num     (s.type));
     o.set ("trimDb",         json::num     (s.trimDb));
+    o.set ("atrasoMs",       json::num     (s.atrasoMs));
+    o.set ("onZero",         json::boolean (s.onVaiParaZero));
+    o.set ("devEstereo",     json::boolean (s.deviceEstereo));
+    o.set ("devIndexR",      json::num     (s.deviceIndexR));
     o.set ("trigEnabled",    json::boolean (s.triggerEnabled));
     o.set ("trigTap",        json::num     (s.triggerTap));
     o.set ("camera",         json::num     (s.camera));
@@ -341,7 +469,8 @@ inline json::Value sourceToJson (const SourceDef& s)
     o.set ("onCommand",      json::text    (s.onCommand));
     o.set ("offCommand",     json::text    (s.offCommand));
     o.set ("logicTarget",    json::num     (s.logicTarget));
-    o.set ("feedSource",     json::num     (s.feedSource));
+    o.set ("feedBusOn",      json::num     (s.feedBusOn));
+    o.set ("feedBusOff",     json::num     (s.feedBusOff));
     o.set ("feedOutputPair", json::num     (s.feedOutputPair));
     o.set ("feedDimDb",      json::num     (s.feedDimDb));
     return o;
@@ -369,6 +498,10 @@ inline SourceDef sourceFromJson (const json::Value& o)
     s.deviceChannel  = int (o.number ("deviceChannel", 0));
     s.type           = int (o.number ("type", double (int (SourceType::Line))));
     s.trimDb         = float (o.number ("trimDb", 0.0));
+    s.atrasoMs       = float (o.number ("atrasoMs", 0.0));
+    s.onVaiParaZero  = o.boolean ("onZero", false);
+    s.deviceEstereo  = o.boolean ("devEstereo", false);
+    s.deviceIndexR   = int (o.number ("devIndexR", -1));
     s.triggerEnabled = o.boolean ("trigEnabled", false);
     s.triggerTap     = int (o.number ("trigTap", 0));
     s.camera         = int (o.number ("camera", 0));
@@ -384,7 +517,10 @@ inline SourceDef sourceFromJson (const json::Value& o)
     s.onCommand      = o.string  ("onCommand");
     s.offCommand     = o.string  ("offCommand");
     s.logicTarget    = int (o.number ("logicTarget", 0));
-    s.feedSource     = int (o.number ("feedSource", 0));
+    const int feedAntigo = int (o.number ("feedSource", -1));   // catalogo de antes do par
+    s.feedBusOn      = int (o.number ("feedBusOn",
+                                      feedAntigo >= 1 ? double (feedAntigo - 1) : 0.0));
+    s.feedBusOff     = int (o.number ("feedBusOff", 3));
     s.feedOutputPair = int (o.number ("feedOutputPair", -1));
     s.feedDimDb      = float (o.number ("feedDimDb", -10.0));
     return s;
@@ -421,6 +557,7 @@ inline json::Value outputsToJson (const OutputCatalog& c)
         v.set ("lwChannel", json::num (o.livewireChannel));
         v.set ("bus",    json::num  (o.busSource));
         v.set ("directSource", json::text (o.directSource));
+        v.set ("mixMinus",     json::num  (o.mixMinusChannel));
         a.arr.push_back (v);
     }
     return a;
@@ -444,27 +581,8 @@ inline void outputsFromJson (const json::Value& a, OutputCatalog& c)
         o.livewireChannel = int (v.number ("lwChannel", 0));
         o.busSource  = int (v.number ("bus", 0));
         o.directSource  = v.string ("directSource");
+        o.mixMinusChannel = int (v.number ("mixMinus", -1));
         c.outputs.push_back (o);
-    }
-}
-
-/** Aplica os destinos ao motor: por enquanto so os de placa: o envio NDI
-    depende do NetworkSink, que ainda nao esta ligado ao mixer. */
-inline void applyOutputs (const OutputCatalog& c, MixerEngine& mix)
-{
-    for (const auto& o : c.outputs)
-    {
-        if (o.kind != int (InputKind::Device)) continue;
-        switch (o.busSource)
-        {
-            case 0: case 1: case 2: case 3:
-                mix.busParams[size_t (o.busSource)].outputPair.store (o.pair); break;
-            case 4: mix.monitor.cuePair    .store (o.pair); break;
-            case 5: mix.monitor.monitorPair.store (o.pair); break;
-            case 6: mix.monitor.phonesPair .store (o.pair); break;
-            case 7: mix.monitor.studioPair .store (o.pair); break;
-            default: break;
-        }
     }
 }
 
@@ -478,6 +596,9 @@ inline json::Value pagesToJson (const PageSet& ps)
         auto slots = json::array();
         for (const auto& sl : p.slots) slots.arr.push_back (json::text (sl));
         o.set ("slots", slots);
+        o.set ("guardaTudo", json::boolean (p.guardaTudo));
+        o.set ("gravadaEm",  json::text (p.gravadaEm));
+        if (p.guardaTudo) o.set ("cena", sceneToValue (p.cena));
         a.arr.push_back (o);
     }
     return a;
@@ -495,6 +616,10 @@ inline void pagesFromJson (const json::Value& a, PageSet& ps)
         if (auto* sl = v.find ("slots"))
             if (sl->type == json::Value::Array)
                 for (const auto& e : sl->arr) p.slots.push_back (e.str);
+
+        p.guardaTudo = v.boolean ("guardaTudo", false);
+        p.gravadaEm  = v.string ("gravadaEm");
+        if (auto* c = v.find ("cena")) sceneFromValue (*c, p.cena);
         ps.pages.push_back (p);
     }
 }

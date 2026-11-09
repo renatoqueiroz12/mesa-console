@@ -16,6 +16,23 @@ namespace mesa {
 class RingBuffer
 {
 public:
+    /** POR QUE OS INDICES SAO DE 64 BITS.
+
+        Eram int de 32 bits que so cresciam, com o resto tirado na hora de
+        indexar. A 48000 amostras por segundo, um int com sinal estoura em
+        2^31 amostras - 44739 segundos, ou 745 minutos. Passando disso, w vira
+        NEGATIVO, (w + i) % cap da negativo, e size_t de um negativo vira um
+        numero astronomico: a escrita vai parar longe do buffer e corrompe a
+        heap.
+
+        Foi isto que derrubou a mesa duas vezes, as duas com 745 minutos de
+        aberta, com erro 0xC0000374 em enderecos diferentes a cada vez - a
+        assinatura de memoria estragada muito antes do lugar onde o programa
+        percebe.
+
+        Com 64 bits o estouro passa a levar 6 milhoes de anos. Nao e elegancia:
+        e a diferenca entre um defeito que aparece toda madrugada e um que nao
+        aparece nunca. */
     void prepare (int capacitySamples)
     {
         buf.assign (size_t (capacitySamples), 0.0f);
@@ -28,18 +45,18 @@ public:
     /** Lado do CONSUMIDOR: quanto ha para ler (acquire no writePos). */
     int used() const noexcept
     {
-        const int w = writePos.load (std::memory_order_acquire);
-        const int r = readPos .load (std::memory_order_relaxed);
-        return w - r;
+        const long long w = writePos.load (std::memory_order_acquire);
+        const long long r = readPos .load (std::memory_order_relaxed);
+        return int (w - r);
     }
 
     /** Lado do PRODUTOR: quanto cabe (acquire no readPos — sem isso ele pode
         sobrescrever a regiao que o consumidor ainda esta copiando). */
     int free() const noexcept
     {
-        const int w = writePos.load (std::memory_order_relaxed);
-        const int r = readPos .load (std::memory_order_acquire);
-        return cap - (w - r);
+        const long long w = writePos.load (std::memory_order_relaxed);
+        const long long r = readPos .load (std::memory_order_acquire);
+        return cap - int (w - r);
     }
 
     float fillRatio() const noexcept { return cap > 0 ? float (used()) / float (cap) : 0.0f; }
@@ -49,7 +66,7 @@ public:
     {
         const int room = free();
         const int toWrite = n < room ? n : room;
-        int w = writePos.load (std::memory_order_relaxed);
+        const long long w = writePos.load (std::memory_order_relaxed);
         for (int i = 0; i < toWrite; ++i)
             buf[size_t ((w + i) % cap)] = src[i];
         writePos.store (w + toWrite, std::memory_order_release);
@@ -63,7 +80,7 @@ public:
     {
         const int avail = used();
         const int toRead = n < avail ? n : avail;
-        int r = readPos.load (std::memory_order_relaxed);
+        const long long r = readPos.load (std::memory_order_relaxed);
         for (int i = 0; i < toRead; ++i)
             dst[i] = buf[size_t ((r + i) % cap)];
         for (int i = toRead; i < n; ++i)
@@ -80,7 +97,7 @@ public:
 private:
     std::vector<float> buf;
     int cap = 0;
-    std::atomic<int> writePos { 0 }, readPos { 0 };
+    std::atomic<long long> writePos { 0 }, readPos { 0 };
 };
 
 /** Uma fonte de audio que chega por fora do driver: NDI, AES67, playout local.
@@ -114,10 +131,34 @@ public:
         lost.store (false);
     }
 
+    std::atomic<bool> teveLeitor { false };
+
     /** thread da rede / do dispositivo secundario */
     void push (const float* samples, int n) noexcept
     {
         ring.write (samples, n);
+        empurradas.fetch_add (n, std::memory_order_relaxed);
+    }
+
+    /** Empurra aplicando um GANHO, sem alocar.
+
+        O barramento e lido por varios consumidores no mesmo bloco - a placa,
+        cada saida de rede, o gravador -, entao nao da para escalar o sinal no
+        lugar: uma saida mudaria o nivel das outras. E a thread de audio nao
+        pode alocar. Por isso o ganho passa por pedacos numa pilha pequena. */
+    void pushComGanho (const float* samples, int n, float ganho) noexcept
+    {
+        if (ganho == 1.0f) { push (samples, n); return; }
+
+        float pedaco[256];
+        int feito = 0;
+        while (feito < n)
+        {
+            const int k = std::min (256, n - feito);
+            for (int i = 0; i < k; ++i) pedaco[i] = samples[feito + i] * ganho;
+            ring.write (pedaco, k);
+            feito += k;
+        }
         empurradas.fetch_add (n, std::memory_order_relaxed);
     }
 
@@ -172,6 +213,7 @@ public:
     const float* pull (int n) noexcept
     {
         pulls.fetch_add (1, std::memory_order_relaxed);
+        teveLeitor.store (true, std::memory_order_relaxed);
         // Trava de seguranca: pedir mais do que o buffer comporta escreveria
         // fora dele e corromperia memoria. Aconteceu de verdade — o
         // transmissor Livewire puxa 240 amostras por pacote e a fila fora
@@ -187,7 +229,12 @@ public:
 
         if (! correctDrift)
         {
+            // O que faltou conta aqui tambem. Sem isto a leitura completava com
+            // zeros e ninguem registrava: fila sem correcao de relogio podia
+            // estar picando e o log dizia zero buracos.
+            const int tinha = ring.used();
             ring.read (scratch.data(), n);
+            if (tinha < n) amostrasFaltando.fetch_add (n - tinha, std::memory_order_relaxed);
             return scratch.data();
         }
 
@@ -255,6 +302,23 @@ public:
     /** Amostras que a fila nao tinha na hora de entregar. Vira buraco no audio:
         e o numero que corresponde ao que se ouve. */
     int  amostrasEmFalta() const noexcept { return amostrasFaltando.load (std::memory_order_relaxed); }
+
+    /** Esta fila esta MESMO no caminho do audio?
+
+        Uma placa de 10 canais abre 10 filas, e a mesa costuma usar duas. As
+        outras oito nunca recebem nada e nunca sao lidas - mas cada leitura
+        vazia contava como buraco, e cada bloco sem produtor tambem. Dava
+        dezenas de milhoes de "buracos" por minuto numa placa que estava bem.
+        O numero servia para julgar a saude da placa, entao mentir nele custa
+        caro: manda consertar o que nao esta quebrado e esconde o que esta.
+
+        Em uso = alguem ja empurrou audio aqui E alguem ja leu. Enquanto uma
+        das pontas faltar, a fila nao entra em conta nenhuma. */
+    bool emUso() const noexcept
+    {
+        return empurradas.load (std::memory_order_relaxed) > 0
+            && teveLeitor.load (std::memory_order_relaxed);
+    }
     bool isConnected() const noexcept { return connected.load (std::memory_order_relaxed); }
 
     std::string name;

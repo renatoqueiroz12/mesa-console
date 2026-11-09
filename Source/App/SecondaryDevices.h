@@ -103,13 +103,18 @@ public:
     int blocoDoDispositivo() const noexcept { return blocoDisp; }
 
     /** Falhas de fila desde a abertura. No modo de latencia minima este numero
-        e o juiz: se sobe durante a operacao, a fila esta rasa demais. */
+        e o juiz: se sobe durante a operacao, a fila esta rasa demais.
+
+        SO AS FILAS EM USO entram na conta. Uma placa de 10 canais abre 10
+        filas e a mesa costuma usar duas; as outras oito acusavam falha a cada
+        amostra e o total batia dezenas de milhoes por minuto numa placa
+        saudavel. Julgar a placa por esse numero levava para o lado errado. */
     int glitches()
     {
         std::lock_guard<std::mutex> g (mutex);
         int t = 0;
-        for (auto& q : queues) if (q != nullptr) t += q->faltas() + q->overflows();
-        for (auto& q : sinks)  if (q != nullptr) t += q->faltas() + q->overflows();
+        for (auto& q : queues) if (q != nullptr && q->emUso()) t += q->faltas() + q->overflows();
+        for (auto& q : sinks)  if (q != nullptr && q->emUso()) t += q->faltas() + q->overflows();
         return t;
     }
 
@@ -119,8 +124,8 @@ public:
     {
         std::lock_guard<std::mutex> g (mutex);
         int t = 0;
-        for (auto& q : queues) if (q != nullptr) t += q->faltas();
-        for (auto& q : sinks)  if (q != nullptr) t += q->faltas();
+        for (auto& q : queues) if (q != nullptr && q->emUso()) t += q->faltas();
+        for (auto& q : sinks)  if (q != nullptr && q->emUso()) t += q->faltas();
         return t;
     }
 
@@ -129,16 +134,16 @@ public:
     {
         std::lock_guard<std::mutex> g (mutex);
         int t = 0;
-        for (auto& q : queues) if (q != nullptr) t += q->amostrasEmFalta();
-        for (auto& q : sinks)  if (q != nullptr) t += q->amostrasEmFalta();
+        for (auto& q : queues) if (q != nullptr && q->emUso()) t += q->amostrasEmFalta();
+        for (auto& q : sinks)  if (q != nullptr && q->emUso()) t += q->amostrasEmFalta();
         return t;
     }
     int descartes()
     {
         std::lock_guard<std::mutex> g (mutex);
         int t = 0;
-        for (auto& q : queues) if (q != nullptr) t += q->overflows();
-        for (auto& q : sinks)  if (q != nullptr) t += q->overflows();
+        for (auto& q : queues) if (q != nullptr && q->emUso()) t += q->overflows();
+        for (auto& q : sinks)  if (q != nullptr && q->emUso()) t += q->overflows();
         return t;
     }
 

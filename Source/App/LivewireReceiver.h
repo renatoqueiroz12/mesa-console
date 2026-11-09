@@ -36,6 +36,18 @@ public:
 
     ~LivewireReceiver() { stop(); }
 
+    /** Quais pontas alguem esta consumindo. Fila sem leitor nao e alimentada:
+        ela so encheria, transbordaria e mentiria na medicao de latencia. */
+    void defineUso (bool l, bool r, bool mono) noexcept
+    {
+        usaL.store (l, std::memory_order_relaxed);
+        usaR.store (r, std::memory_order_relaxed);
+        usaSoma.store (mono, std::memory_order_relaxed);
+    }
+    bool usandoL()    const noexcept { return usaL.load (std::memory_order_relaxed); }
+    bool usandoR()    const noexcept { return usaR.load (std::memory_order_relaxed); }
+    bool usandoSoma() const noexcept { return usaSoma.load (std::memory_order_relaxed); }
+
     /** Endereco multicast a partir do numero do canal Livewire. */
     static juce::String addressForChannel (int channel)
     {
@@ -223,9 +235,15 @@ private:
                 r[size_t (i)] = sample24 (d);     d += 3;
             }
 
-            left .push (l.data(), frames);
-            right.push (r.data(), frames);
-            if (soma != nullptr)
+            // SO AS FILAS QUE ALGUEM CONSOME.
+            //
+            // Antes as tres eram alimentadas sempre. As que ninguem lia
+            // enchiam ate o topo e ficavam la, em transbordo permanente - e
+            // mediam a latencia maxima possivel, o que fez o registro acusar
+            // 80 ms de atraso que nao existia no caminho do audio.
+            if (usaL.load (std::memory_order_relaxed)) left .push (l.data(), frames);
+            if (usaR.load (std::memory_order_relaxed)) right.push (r.data(), frames);
+            if (soma != nullptr && usaSoma.load (std::memory_order_relaxed))
             {
                 for (int i = 0; i < frames; ++i)
                     m[size_t (i)] = 0.5f * (l[size_t (i)] + r[size_t (i)]);
@@ -246,6 +264,7 @@ private:
     static constexpr int kPort = 5004;
     static constexpr int kRtpHeader = 12;
 
+    std::atomic<bool> usaL { false }, usaR { false }, usaSoma { false };
     mesa::AsyncSource& left;
     mesa::AsyncSource& right;
     mesa::AsyncSource* soma = nullptr;

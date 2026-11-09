@@ -96,7 +96,7 @@ private:
     {
         header.setText ("CANAL " + juce::String (index + 1) + "   \x7c   "
                         + juce::String (ch.name)
-                        + "   \x7c   IN " + juce::String (ch.tapDb (mesa::TapPoint::Input), 1)
+                        + "   \x7c   IN " + juce::String (ch.tapDb (mesa::TapPoint::PostAutoTrim), 1)
                         + " dBFS   \x7c   OUT "
                         + juce::String (ch.tapDb (mesa::TapPoint::PostFader), 1)
                         + " dBFS   \x7c   fader "
@@ -201,21 +201,40 @@ private:
                                       "Player de PC", "Feed de Estudio" };
 
         p->addRow ("Fonte", makeLeitura (fonte));
-        p->addRow ("Uso", makeLeitura (usos[juce::jlimit (0, 9, ch.params.sourceType.load())]));
+        p->addRow ("Uso", makeLeitura (mesa::nomeDoUso (ch.params.sourceType.load())));
         p->addNote ("Para trocar a fonte, o uso ou o trim deste input, va em "
                     "Configuracoes > Inputs e abra o input pelo nome. O que muda la "
                     "vale para qualquer fader que o carregar.");
 
-        p->addTitle ("Mix-minus");
-        p->addNote ("Telefone, codec e feed de estudio recebem backfeed proprio: "
-                    "o programa menos a propria voz. Sem isso o interlocutor se ouve.");
+        if (ch.params.inputIndexR.load() >= 0)
+        {
+            p->addTitle ("DSP");
+            p->addNote ("Este canal esta em ESTEREO e o rack de DSP nao atua nele - nem EQ, "
+                        "nem compressor, nem gate. Para usar DSP, mude o input para MONO em "
+                        "Configuracoes > Inputs.");
+        }
 
-        auto* feedBox = new juce::ComboBox();
-        feedBox->addItem ("automatico", 1);
-        for (int b = 1; b <= 4; ++b) feedBox->addItem ("PGM " + juce::String (b), b + 1);
-        feedBox->setSelectedId (ch.params.feedSource.load() + 1, juce::dontSendNotification);
-        feedBox->onChange = [this, feedBox] { ch.params.feedSource.store (feedBox->getSelectedId() - 1); };
-        p->addRow ("Fonte do backfeed", feedBox);
+        p->addTitle ("Mix-minus");
+        p->addNote ("O interlocutor ouve a mesa MENOS a propria voz - sem isso ele se "
+                    "escuta com atraso e nao consegue falar. A fonte do retorno troca "
+                    "sozinha com o ON/OFF deste fader: fora do ar ele ouve a comunicacao, "
+                    "onde voce fala com ele; no ar, ouve o programa. Nos dois casos a voz "
+                    "dele fica de fora.");
+
+        auto* onBox = new juce::ComboBox();
+        for (int b = 0; b < 4; ++b) onBox->addItem ("PGM " + juce::String (b + 1), b + 1);
+        onBox->setSelectedId (juce::jlimit (0, 3, ch.params.feedBusOn.load()) + 1,
+                              juce::dontSendNotification);
+        onBox->onChange = [this, onBox] { ch.params.feedBusOn.store (onBox->getSelectedId() - 1); };
+        p->addRow ("Ouve no AR (canal ON)", onBox);
+
+        auto* offBox = new juce::ComboBox();
+        for (int b = 0; b < 4; ++b) offBox->addItem ("PGM " + juce::String (b + 1), b + 1);
+        offBox->setSelectedId (juce::jlimit (0, 3, ch.params.feedBusOff.load()) + 1,
+                               juce::dontSendNotification);
+        offBox->onChange = [this, offBox] { ch.params.feedBusOff.store (offBox->getSelectedId() - 1); };
+        p->addRow ("Ouve FORA do ar (canal OFF)", offBox);
+        p->addNote ("PGM 4 e o barramento de COMUNICACAO, marcado com o telefone na tira. Ele e diferente dos outros tres: recebe o canal mesmo com o fader FECHADO, para dar para falar com o ouvinte antes de por no ar. Quem cala nele e o MUTE, nao o OFF.");
 
         auto* outBox = new juce::ComboBox();
         outBox->addItem ("nao roteado", 1);
@@ -223,7 +242,10 @@ private:
             outBox->addItem (juce::String (k * 2 + 1) + "/" + juce::String (k * 2 + 2), k + 2);
         outBox->setSelectedId (ch.params.feedOutputPair.load() + 2, juce::dontSendNotification);
         outBox->onChange = [this, outBox] { ch.params.feedOutputPair.store (outBox->getSelectedId() - 2); };
-        p->addRow ("Saida do backfeed", outBox);
+        p->addRow ("Saida na placa principal", outBox);
+        p->addNote ("So para par da placa principal. Para mandar este retorno por Livewire "
+                    "ou por placa secundaria, crie uma saida em Configuracoes > Outputs e "
+                    "escolha \"Mix-minus (de um canal)\" no que sai.");
 
         slider (*p, "DIM no talkback", ch.params.feedDimDb.load(), -30.0, 0.0, 0.5,
                 [this] (float v) { ch.params.feedDimDb.store (v); });
@@ -242,64 +264,131 @@ private:
     {
         auto* p = new CfgPage();
         p->addTitle ("Trim e fader");
-        slider (*p, "Trim manual (dB)", ch.params.trimDb.load(), -25.0, 25.0, 0.1,
+        slider (*p, "Input trim gain (dB)", ch.params.trimDb.load(), -25.0, 25.0, 0.1,
                 [this] (float v) { ch.params.trimDb.store (v); });
-        slider (*p, "Fader (dB)", ch.params.faderDb.load(), -60.0, 20.0, 0.1,
+
+        slider (*p, "Atraso para sync com video (ms)", ch.params.atrasoMs.load(),
+                0.0, mesa::Atraso::kMaxMs, 1.0,
+                [this] (float v) { ch.params.atrasoMs.store (v); });
+        p->addNote ("Atrasa ESTE canal para casar com o video. Video passa por captura, "
+                    "conversao, mistura e codificacao; o audio chega quase na hora, e sem "
+                    "atrasar a boca anda na frente da voz. O ajuste e por fonte porque cada "
+                    "uma tem o seu - camera com conversor atrasa mais que camera direta.");
+        p->addNote ("Como achar o numero: grave alguem batendo palma na frente da camera, "
+                    "olhe a diferenca entre o estalo e a imagem, e ponha isso aqui. Vai ate 2 "
+                    "segundos, que cobre ate cadeia com encoder de stream. So ATRASA; para o "
+                    "caso contrario, quem atrasa e o mixer de video. Vale para tudo que sai "
+                    "do canal - barramento, direct out, CUE e medidores andam juntos.");
+        slider (*p, "Fader (dB)", ch.params.faderDb.load(),
+                double (theme::kFaderBottomDb), double (theme::kFaderTopDb), 0.1,
                 [this] (float v) { ch.params.faderDb.store (v); });
         slider (*p, "Pan", ch.params.panPos.load(), -1.0, 1.0, 0.01,
                 [this] (float v) { ch.params.panPos.store (v); });
         toggle (*p, "Mute", ch.params.mute.load(),
                 [this] (bool v) { ch.params.mute.store (v); });
 
-        p->addTitle ("Automix (nivelador de fader)");
-        p->addNote ("Move o FADER para manter o canal no alvo, como um operador "
-                    "acompanhando. Mede antes do fader, para nao realimentar. "
-                    "Encostar no fader desliga: quem manda e quem esta na sala.");
+        toggle (*p, "ON leva o fader para 0 dB", ch.params.onVaiParaZero.load(),
+                [this] (bool v) { ch.params.onVaiParaZero.store (v); });
+        p->addNote ("DUPLO CLIQUE no fader tambem volta para 0 dB, a qualquer momento e sem "
+                    "depender desta opcao. O que esta opcao faz e isso acontecer sozinho ao "
+                    "ligar o canal, sem ninguem clicar.");
+        p->addNote ("Ao ligar o canal, o fader vai para a unidade - o ponto de referencia da "
+                    "mesa. Serve para operacao rapida: aperta ON e ja esta no nivel, sem "
+                    "procurar onde deixar o fader. Vale para qualquer forma de ligar: tela, "
+                    "GPIO, comando remoto ou automacao. Desligado de fabrica, porque mexer no "
+                    "fader de quem nao pediu e surpresa que ninguem quer no ar.");
+
+        p->addTitle ("Auto fader");
+        p->addNote ("Quando a entrada passa do limiar, ele assume o fader e o move ate a "
+                    "SAIDA do canal chegar no nivel que voce pediu. Abaixo do limiar, congela "
+                    "onde esta. Encostar no fader desliga: quem manda e quem esta na sala.");
         auto& am = ch.params.autoMix;
-        auto& atx = ch.params.autoTrim;
 
-        // os dois perseguem nivel; ligados juntos, brigam
-        toggle (*p, "Ligado", am.enabled.load(), [&am, &atx] (bool v)
-                { am.enabled.store (v); if (v) atx.enabled.store (false); });
+        toggle (*p, "Ligado", am.enabled.load(), [&am] (bool v) { am.enabled.store (v); });
 
-        slider (*p, "Alvo (dBFS RMS)", am.targetDb.load(), -40.0, -6.0, 0.5,
-                [&am] (float v) { am.targetDb.store (v); });
-        p->addNote ("O alvo e RMS; o medidor da tira mostra PICO. Em fala o pico fica "
-                    "uns 12 dB acima do RMS: alvo -18 faz a barra bater perto de -6. "
-                    "A marca azul na barra OUT mostra onde ele esta mirando.");
-        slider (*p, "Fader maximo (dB)", am.maxFaderDb.load(), -10.0, 20.0, 0.5,
-                [&am] (float v) { am.maxFaderDb.store (v); });
-        slider (*p, "Fader minimo (dB)", am.minFaderDb.load(), -60.0, 0.0, 0.5,
-                [&am] (float v) { am.minFaderDb.store (v); });
-        slider (*p, "So atua acima de (dBFS)", am.floorDb.load(), -70.0, -20.0, 0.5,
+        // OS DOIS CAMPOS QUE IMPORTAM, na frente e com o nome do que fazem.
+        //
+        // Estavam no meio de sete ajustes, com nomes tecnicos, e nao dava para
+        // ver que o recurso inteiro gira em torno deles: um diz QUANDO ele
+        // assume, o outro diz ONDE ele tem de chegar.
+        slider (*p, "1. Assume quando a ENTRADA passa de (dBFS)",
+                am.floorDb.load(), -70.0, 0.0, 0.5,
                 [&am] (float v) { am.floorDb.store (v); });
-        p->addNote ("Abaixo deste nivel ele congela. E o que impede o fader de subir "
-                    "atras do ruido de sala na pausa. Suba ate parar de andar em silencio.");
-        slider (*p, "Velocidade (dB/s)", am.speedDbPerSec.load(), 0.5, 20.0, 0.5,
+        p->addNote ("E o MESMO numero que a barra IN desta tira marca - com o auto fader "
+                    "ligado, aparece um tracejado na barra mostrando onde ele fica. Acima "
+                    "dele o fader e pilotado; abaixo, congela onde esta. Se ele andar sozinho "
+                    "no silencio, o numero esta baixo demais; num estudio com ruido, -30 "
+                    "costuma ser mais realista que -45.");
+
+        slider (*p, "2. Leva a SAIDA para (dBFS)", am.targetDb.load(), -40.0, 0.0, 0.5,
+                [&am] (float v) { am.targetDb.store (v); });
+        p->addNote ("O numero que a barra OUT desta tira vai marcar. Os dois campos falam a "
+                    "mesma lingua das barras: o 1 e o que voce le no IN, o 2 e o que voce vai "
+                    "ler no OUT. Como -18 dBFS e o 0 da regua (EBU R68), alvo -18 quer dizer "
+                    "manter o canal no zero.");
+        p->addNote ("O alvo e em dBFS, e -18 dBFS e o 0 da regua dos medidores (EBU R68). "
+                    "Entao ALVO -18 = manter o canal no zero, que e o que se quer dizer com "
+                    "\"manter em 0 dB\". A marca azul na barra OUT mostra onde ele esta "
+                    "mirando.");
+
+        // O campo "Mede por" saiu: agora o laco olha exatamente o que as barras
+        // mostram, dos dois lados. Escolher a unidade so servia para o numero
+        // do alvo deixar de bater com a tela.
+
+        // O QUE ELE ESTA VENDO E DECIDINDO, ao vivo.
+        //
+        // Sem isto, fader grudado no teto nao tinha explicacao na tela - e a
+        // explicacao quase sempre e a mesma: a ENTRADA esta fora do lugar e
+        // nenhum ajuste de fader resolve, falta ou sobra trim.
+        {
+            const auto& nv = ch.nivelador();
+            juce::String estado;
+            estado << "saida " << juce::String (nv.saidaMedidaDb(), 1)
+                   << " -> alvo " << juce::String (am.targetDb.load(), 1)
+                   << " dBFS   |   fader quer " << juce::String (nv.faderDesejadoDb(), 1)
+                   << " dB   (entrada " << juce::String (nv.nivelMedidoDb(), 1) << ")";
+            p->addRow ("Agora", makeLeitura (estado.toStdString()));
+            p->addNote ("O que ele persegue e a SAIDA chegar no alvo. A entrada aparece so "
+                        "para referencia - serve para decidir se ha som, nao para calcular o "
+                        "fader.");
+
+            if (nv.limitado() > 0)
+                p->addNote ("ENCOSTADO NO TETO: ele quer subir mais do que o fader maximo "
+                            "permite. O problema e a ENTRADA estar fraca - suba o Input trim "
+                            "gain ate o medidor IN chegar perto do 0 e o nivelador passa a "
+                            "trabalhar dentro da faixa.");
+            else if (nv.limitado() < 0)
+                p->addNote ("ENCOSTADO NO PISO: ele quer baixar mais do que o fader minimo "
+                            "permite. A ENTRADA esta quente demais - baixe o Input trim gain.");
+        }
+
+        slider (*p, "Velocidade ao SUBIR (dB/s)", am.speedDbPerSec.load(), 0.5, 40.0, 0.5,
                 [&am] (float v) { am.speedDbPerSec.store (v); });
-        p->addNote ("Velocidade alta reage rapido e bombeia; baixa e discreta e demora "
-                    "a acompanhar quem fala muito baixo. 4 a 8 dB/s costuma ser o ponto.");
+        p->addNote ("Quando a saida esta abaixo do alvo. Devagar e discreto - ninguem repara "
+                    "num nivel que cresce. 4 a 8 dB/s costuma ser o ponto.");
+
+        slider (*p, "Velocidade ao BAIXAR (dB/s)", am.descidaDbPerSec.load(), 1.0, 120.0, 1.0,
+                [&am] (float v) { am.descidaDbPerSec.store (v); });
+        p->addNote ("Quando a saida passou do alvo. Bem mais rapida de proposito: descer "
+                    "devagar deixa o pico passar inteiro antes de a correcao chegar, e pico "
+                    "que passa e o unico erro que se ouve. E a mesma razao pela qual "
+                    "compressor tem attack curto e release longo. 30 a 60 dB/s segura os "
+                    "picos sem bombear.");
+
+
 
         auto* resetAm = new juce::TextButton ("VOLTAR AOS AJUSTES DE FABRICA");
         resetAm->onClick = [this] { mesa::resetAutoMix (ch); rebuildTabs(); };
         p->addRow ("Ajustes", resetAm, 30);
 
-        p->addTitle ("Auto trim");
-        p->addNote ("Corrige o nivel medio da fonte antes do DSP. Nao substitui o trim "
-                    "manual: trabalha por cima dele, devagar, e para no silencio.");
-        auto& at = ch.params.autoTrim;
-        toggle (*p, "Ligado", at.enabled.load(), [&am, &at] (bool v)
-                { at.enabled.store (v); if (v) am.enabled.store (false); });
-        slider (*p, "Alvo RMS (dBFS)", at.targetDb.load(), -40.0, -6.0, 0.5,
-                [&at] (float v) { at.targetDb.store (v); });
-        slider (*p, "Ganho maximo (dB)", at.maxGainDb.load(), 0.0, 30.0, 0.5,
-                [&at] (float v) { at.maxGainDb.store (v); });
-        slider (*p, "Ganho minimo (dB)", at.minGainDb.load(), -30.0, 0.0, 0.5,
-                [&at] (float v) { at.minGainDb.store (v); });
-        slider (*p, "Piso de atuacao (dBFS)", at.gateDb.load(), -70.0, -20.0, 0.5,
-                [&at] (float v) { at.gateDb.store (v); });
-        slider (*p, "Velocidade (dB/s)", at.speedDbPerSec.load(), 0.5, 12.0, 0.5,
-                [&at] (float v) { at.speedDbPerSec.store (v); });
+        // AUTO TRIM SAIU DA TELA, e fica desligado.
+        //
+        // Duas automacoes de nivel na mesma tira, cada uma mexendo num lugar
+        // diferente da cadeia, e o operador tendo de entender a diferenca para
+        // nao ligar as duas. Uma so faz o servico: o auto fader, que mexe no
+        // fader e persegue a saida. O trim continua sendo ajuste de quem
+        // instala, feito uma vez olhando o medidor IN.
+        ch.params.autoTrim.enabled.store (false);
         return p;
     }
 

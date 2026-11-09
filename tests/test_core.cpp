@@ -8,6 +8,8 @@
 #include "../Source/Core/SpeechSegmenter.h"
 #include "../Source/Core/AutomationEngine.h"
 #include "../Source/Core/AnuncioLw.h"
+#include "../Source/Core/GeradorTeste.h"
+#include "../Source/Core/Atraso.h"
 #include <thread>
 #include <cstdio>
 #include <cmath>
@@ -1704,6 +1706,1708 @@ int main()
 
         acha ("FONTE QUE SUMIU", k, i);
         check (i == -1, "fonte apagada devolve -1, e o destino cai no barramento");
+    }
+
+    // -------- mix-minus: duas fontes que alternam com o ON/OFF do canal
+    {
+        using namespace mesa;
+        MixerEngine mix;
+        mix.prepare (48000.0, 64, 4);
+
+        // canal 0: o telefone. canal 1: um microfone, so para haver programa.
+        auto& tel = mix.channel (0);
+        auto& mic = mix.channel (1);
+        tel.params.sourceType.store (int (SourceType::Phone));
+        tel.params.inputKind .store (int (InputKind::Device));
+        tel.params.inputIndex.store (0);
+        tel.params.faderDb   .store (0.0f);
+        tel.params.busMask   .store (0b1001u);        // PGM 1 e PGM 4
+        tel.params.feedBusOn .store (0);              // no ar ouve o PGM 1
+        tel.params.feedBusOff.store (3);              // fora do ar, o PGM 4
+        mic.params.inputKind .store (int (InputKind::Device));
+        mic.params.inputIndex.store (1);
+        mic.params.faderDb   .store (0.0f);
+        mic.params.busMask   .store (0b1111u);        // fala nos quatro
+        mic.params.on        .store (true);
+
+        const int n = 64;
+        const size_t nn = size_t (n);
+        std::vector<float> vozTel (nn, 0.5f);         // constante, facil de ver
+        std::vector<float> vozMic (nn, 0.25f);
+        const float* entradas[2] = { vozTel.data(), vozMic.data() };
+        std::vector<float> saida (nn * 8, 0.0f);
+        float* saidas[8];
+        for (int k = 0; k < 8; ++k) saidas[k] = saida.data() + size_t (k) * size_t (n);
+
+        // Os ganhos de fader e trim sobem suavizados (20 e 25 ms). Dois blocos
+        // de 64 amostras dao 2,7 ms e o nivel ainda esta subindo: medir ali
+        // compara numeros que nao chegaram ao destino. 100 blocos passam de
+        // 130 ms e a essa altura tudo esta estavel.
+        auto roda = [&]
+        {
+            for (int passo = 0; passo < 100; ++passo)
+            {
+                for (int k = 0; k < 8; ++k)
+                    std::fill (saidas[k], saidas[k] + n, 0.0f);
+                mix.process (entradas, 2, saidas, 8, n, nullptr, 0);
+            }
+        };
+
+        auto meioDoBloco = [n] (const float* v) { return v[n - 1]; };
+
+        // --- FORA DO AR: ouve o barramento de comunicacao, nao o programa
+        tel.params.on.store (false);
+        roda();
+        const float fora = meioDoBloco (mix.backfeedData (0));
+        check (std::fabs (fora - 0.25f) < 0.02f,
+               "fora do ar, o retorno traz o barramento de comunicacao");
+
+        // --- NO AR: passa a ouvir o programa
+        tel.params.on.store (true);
+        roda();
+        const float dentro = meioDoBloco (mix.backfeedData (0));
+        check (std::fabs (dentro - 0.25f) < 0.03f,
+               "no ar, o retorno traz o programa sem a voz do proprio telefone");
+
+        // A prova que importa: a voz do telefone (0.5) esta no PGM 1 junto com
+        // o microfone (0.25), somando 0.75 - e o retorno tem de ficar em 0.25.
+        const float pgm = meioDoBloco (mix.busLeft (0));
+        check (pgm > 0.6f, "o telefone realmente entra no programa quando esta no ar");
+        check (std::fabs (dentro - (pgm - 0.5f)) < 0.03f,
+               "o retorno e o programa MENOS exatamente a contribuicao do canal");
+
+        // --- trocar os barramentos muda o retorno, sem tocar em mais nada
+        tel.params.feedBusOn.store (1);               // no ar passa a ouvir PGM 2
+        roda();
+        check (std::fabs (meioDoBloco (mix.backfeedData (0)) - 0.25f) < 0.03f,
+               "trocar o barramento do ar redireciona o retorno");
+        tel.params.feedBusOn.store (0);
+
+        // --- O CASO QUE FALTAVA: falar com o ouvinte antes de por no ar.
+        //
+        // Os dois faders fechados. O de comunicacao tem de passar assim mesmo:
+        // era isto que nao funcionava, e sem isto so da para falar com o
+        // ouvinte entrando no ar antes — que e o que ninguem quer fazer.
+        tel.params.on.store (false);
+        mic.params.on.store (false);
+        roda();
+        check (std::fabs (meioDoBloco (mix.backfeedData (0)) - 0.25f) < 0.02f,
+               "com tudo fechado, o operador ainda fala com o ouvinte");
+        // o barramento leva os dois com tudo fechado: o microfone (0,25) e o
+        // proprio telefone (0,5), que tambem esta roteado nele
+        const float comBus = meioDoBloco (mix.busLeft (mesa::kBusComunicacao));
+        check (std::fabs (comBus - 0.75f) < 0.03f,
+               "o barramento de comunicacao recebe canal fechado");
+
+        // e o programa, esse continua vazio: canal fechado nao vai ao ar
+        check (std::fabs (meioDoBloco (mix.busLeft (0))) < 0.01f,
+               "canal fechado continua fora do PGM 1");
+
+        // a voz do proprio telefone nao pode voltar nem na conversa fora do ar
+        check (comBus > 0.6f, "o telefone tambem entra no barramento de comunicacao");
+        check (std::fabs (meioDoBloco (mix.backfeedData (0)) - (comBus - 0.5f)) < 0.03f,
+               "fora do ar o retorno tambem sai sem a voz do proprio telefone");
+
+        // MUTE e ordem explicita de silencio: vale ate na comunicacao
+        mic.params.mute.store (true);
+        roda();
+        check (std::fabs (meioDoBloco (mix.backfeedData (0))) < 0.02f,
+               "MUTE cala o canal ate no barramento de comunicacao");
+        mic.params.mute.store (false);
+    }
+
+    // -------- canal estereo: as duas pontas ate o barramento
+    {
+        using namespace mesa;
+        MixerEngine mix;
+        mix.prepare (48000.0, 64, 2);
+
+        auto& st = mix.channel (0);
+        st.params.inputKind  .store (int (InputKind::Network));
+        st.params.inputIndex .store (0);
+        st.params.inputIndexR.store (1);        // a segunda ponta
+        st.params.faderDb    .store (0.0f);
+        st.params.busMask    .store (0b0001u);
+        st.params.on         .store (true);
+
+        const int n = 64;
+        const size_t nn = size_t (n);
+        std::vector<float> esq (nn, 0.8f);      // so na esquerda
+        std::vector<float> dir (nn, 0.2f);      // so na direita
+        const float* rede[2] = { esq.data(), dir.data() };
+        std::vector<float> saida (nn * 4, 0.0f);
+        float* saidas[4];
+        for (int k = 0; k < 4; ++k) saidas[k] = saida.data() + size_t (k) * nn;
+
+        auto roda = [&]
+        {
+            for (int passo = 0; passo < 100; ++passo)
+            {
+                for (int k = 0; k < 4; ++k) std::fill (saidas[k], saidas[k] + n, 0.0f);
+                mix.process (nullptr, 0, saidas, 4, n, rede, 2);
+            }
+        };
+        roda();
+
+        const float l = mix.busLeft  (0)[n - 1];
+        const float r = mix.busRight (0)[n - 1];
+        check (std::fabs (l - 0.8f) < 0.03f, "a esquerda chega inteira no lado esquerdo");
+        check (std::fabs (r - 0.2f) < 0.03f, "a direita chega inteira no lado direito");
+        check (std::fabs (l - r) > 0.4f, "os dois lados seguem diferentes - nao virou mono");
+        check (st.ehEstereo(), "o canal se reconhece estereo");
+
+        // PAN VIRA BALANCO: todo a esquerda tem de calar o lado direito
+        st.params.panPos.store (-1.0f);
+        roda();
+        check (std::fabs (mix.busLeft (0)[n - 1] - 0.8f) < 0.03f,
+               "pan na ponta esquerda mantem o lado esquerdo");
+        check (std::fabs (mix.busRight (0)[n - 1]) < 0.02f,
+               "pan na ponta esquerda cala o lado direito");
+        st.params.panPos.store (0.0f);
+
+        // sem a segunda ponta o canal volta a ser mono, e o mesmo sinal vai aos dois
+        st.params.inputIndexR.store (-1);
+        roda();
+        check (! st.ehEstereo(), "sem segunda ponta o canal volta a mono");
+        check (std::fabs (mix.busLeft (0)[n - 1] - mix.busRight (0)[n - 1]) < 0.001f,
+               "em mono os dois lados do barramento recebem o mesmo");
+    }
+
+    // -------- chave da fila: qual receptor esta em uso
+    //
+    // Isto nasceu de um crash na abertura. A limpeza dos receptores Livewire
+    // listava os lados na mao (":0", ":1", ":2"); quando o lado 3 (estereo)
+    // entrou, a chave dele nao batia com nenhum, o receptor recem-criado era
+    // destruido como se sobrasse, e o motor ficava com ponteiro solto - a mesa
+    // caia no primeiro bloco de audio. A regra passou a ser por prefixo, e
+    // estes casos existem para que lado novo nao repita a historia.
+    {
+        using namespace mesa;
+        SourceDef s;
+        s.livewireChannel = 3100;
+
+        for (int lado = 0; lado <= 3; ++lado)
+        {
+            s.livewireSide = lado;
+            const auto k = chaveDaFonte (s);
+            check (chaveEhDoCanal (k, 3100),
+                   ("lado " + std::to_string (lado) + " reconhecido como do canal 3100").c_str());
+            check (! chaveEhDoCanal (k, 3101), "e nao confundido com outro canal");
+        }
+
+        // a segunda ponta do estereo guarda a chave com sufixo
+        s.livewireSide = 3;
+        check (chaveEhDoCanal (chaveDaFonte (s) + "/R", 3100),
+               "a segunda ponta do estereo tambem conta como em uso");
+
+        // canal parecido nao pode casar por acidente: 310 nao e comeco de 3100
+        SourceDef curto; curto.livewireChannel = 310; curto.livewireSide = 0;
+        check (! chaveEhDoCanal (chaveDaFonte (curto), 3100),
+               "canal 310 nao e confundido com 3100");
+        check (! chaveEhDoCanal (chaveDaFonte (s), 310),
+               "nem 3100 com 310");
+
+        // fontes de outro tipo nao pertencem a canal Livewire nenhum
+        SourceDef ndi; ndi.streamName = "PLAYOUT";
+        check (! chaveEhDoCanal (chaveDaFonte (ndi), 3100), "fonte NDI fica de fora");
+        SourceDef dev; dev.deviceName = "UMC"; dev.deviceChannel = 2;
+        check (! chaveEhDoCanal (chaveDaFonte (dev), 3100), "fonte de placa fica de fora");
+        check (chaveDaFonte (SourceDef{}).empty(), "fonte vazia nao gera chave");
+    }
+
+    // -------- a lista de outputs manda no que sai pela placa mestra
+    {
+        using namespace mesa;
+        MixerEngine mix;
+        mix.prepare (48000.0, 64, 2);
+
+        Settings st;
+        OutputDef pgm;  pgm.name = "PGM 1";      pgm.busSource = 0; pgm.pair = 0;
+        OutputDef mon;  mon.name = "MONITOR";    mon.busSource = 5; mon.pair = 2;
+        st.outputs.outputs = { pgm, mon };
+        aplicaSaidasDaPlaca (st, mix);
+
+        check (mix.busParams[0].outputPair.load() == 0, "PGM 1 vai para o par escolhido");
+        check (mix.monitor.monitorPair.load() == 2,
+               "monitor tambem e aplicado - nao so os quatro PGM");
+
+        // TIRAR a placa de um destino tem de TIRAR mesmo. Era o defeito: sem
+        // par, a saida caia num "continue" e o roteamento velho continuava.
+        st.outputs.outputs[0].pair = -1;
+        aplicaSaidasDaPlaca (st, mix);
+        check (mix.busParams[0].outputPair.load() == -1, "sem par, o PGM 1 para de sair");
+        check (mix.monitor.monitorPair.load() == 2, "e os outros destinos nao se mexem");
+
+        // mover a placa de um destino para outro: sai do primeiro, chega no segundo
+        st.outputs.outputs[0].pair = -1;
+        st.outputs.outputs[1].pair = 0;
+        aplicaSaidasDaPlaca (st, mix);
+        check (mix.busParams[0].outputPair.load() == -1, "o destino antigo ficou vazio");
+        check (mix.monitor.monitorPair.load() == 0, "e o novo recebeu o par");
+
+        // apagar a saida da lista some com o roteamento dela
+        st.outputs.outputs.clear();
+        aplicaSaidasDaPlaca (st, mix);
+        check (mix.monitor.monitorPair.load() == -1, "saida apagada para de sair");
+        check (mix.busParams[3].outputPair.load() == -1, "lista vazia nao roteia nada");
+
+        // rede e placa secundaria nao entram por aqui
+        OutputDef lw;  lw.name = "LW";  lw.busSource = 1; lw.pair = 1; lw.livewireChannel = 3600;
+        OutputDef sec; sec.name = "SEC"; sec.busSource = 2; sec.pair = 1; sec.deviceName = "UMC";
+        st.outputs.outputs = { lw, sec };
+        aplicaSaidasDaPlaca (st, mix);
+        check (mix.busParams[1].outputPair.load() == -1, "saida Livewire nao roteia par de placa");
+        check (mix.busParams[2].outputPair.load() == -1, "placa secundaria tambem nao");
+
+        // direct out e mix-minus nao sao barramento: melhor nao sair do que
+        // sair o sinal errado pela placa mestra
+        OutputDef d;  d.name = "D"; d.busSource = 0; d.pair = 1; d.directSource = "MIC 1";
+        OutputDef mm; mm.name = "M"; mm.busSource = 1; mm.pair = 2; mm.mixMinusChannel = 0;
+        st.outputs.outputs = { d, mm };
+        aplicaSaidasDaPlaca (st, mix);
+        check (mix.busParams[0].outputPair.load() == -1, "direct out nao vira barramento");
+        check (mix.busParams[1].outputPair.load() == -1, "mix-minus tambem nao");
+    }
+
+    // -------- fila so conta como falha se estiver no caminho do audio
+    {
+        mesa::AsyncSource q;
+        q.prepare (64, 8, 48000.0, 0.35);
+        check (! q.emUso(), "fila recem-criada nao esta em uso");
+
+        std::vector<float> v (64, 0.5f);
+        q.push (v.data(), 64);
+        check (! q.emUso(), "so com produtor ainda nao conta");
+
+        mesa::AsyncSource q2;
+        q2.prepare (64, 8, 48000.0, 0.35);
+        q2.pull (64);
+        check (! q2.emUso(), "so com leitor tambem nao conta");
+
+        q.pull (64);
+        check (q.emUso(), "com as duas pontas, ai sim entra na conta");
+    }
+
+    // -------- destino de monitoracao na placa mestra sobrevive ao religamento
+    //
+    // Regressao real: a lista de outputs virou a unica verdade e passou a
+    // reescrever o roteamento inteiro. A tela de Monitoracao escrevia direto
+    // no roteamento, sem passar pelo catalogo, e a escolha era apagada na
+    // primeira aplicacao - salvar, fechar e abrir devolvia "nao roteado".
+    {
+        using namespace mesa;
+        MixerEngine mix;
+        mix.prepare (48000.0, 64, 2);
+
+        Settings st;
+        // como a tela grava agora: roteamento E catalogo
+        st.routing.monitorOutputPair = 1;
+        OutputDef mon; mon.name = "MON 5"; mon.busSource = 5; mon.pair = 1;
+        st.outputs.outputs = { mon };
+
+        aplicaSaidasDaPlaca (st, mix);
+        check (st.routing.monitorOutputPair == 1, "o monitor continua no par escolhido");
+        check (mix.monitor.monitorPair.load() == 1, "e o motor recebe o mesmo par");
+
+        // segunda aplicacao, como acontece ao reabrir a mesa
+        aplicaSaidasDaPlaca (st, mix);
+        check (st.routing.monitorOutputPair == 1, "e sobrevive a reabertura");
+
+        // sem entrada no catalogo, o roteamento solto NAO sobrevive - e o
+        // comportamento correto: a lista manda
+        Settings solto;
+        solto.routing.phonesOutputPair = 3;
+        aplicaSaidasDaPlaca (solto, mix);
+        check (solto.routing.phonesOutputPair == -1,
+               "roteamento sem entrada na lista nao se sustenta");
+    }
+
+    // -------- Input trim gain: o medidor IN tem de reagir ao trim
+    //
+    // Defeito real: o medidor IN media ANTES do trim. Subir o ganho de entrada
+    // nao mexia nele - o efeito so aparecia no OUT, que e o contrario de como
+    // se usa o trim. Trim existe para trazer a fonte ao nivel certo, e o nivel
+    // certo se le no medidor da entrada.
+    {
+        using namespace mesa;
+        Channel ch;
+        ch.prepare (48000.0, 64);
+        ch.params.on.store (true);
+        ch.params.faderDb.store (0.0f);
+
+        const int n = 64;
+        std::vector<float> v (size_t (n), 0.1f);       // cerca de -20 dBFS
+
+        auto roda = [&] { for (int k = 0; k < 200; ++k) ch.process (v.data(), n); };
+
+        ch.params.trimDb.store (0.0f);
+        roda();
+        const float in0  = ch.tapDb (TapPoint::PostAutoTrim);
+        const float out0 = ch.tapDb (TapPoint::PostFader);
+
+        ch.params.trimDb.store (12.0f);
+        roda();
+        const float in1  = ch.tapDb (TapPoint::PostAutoTrim);
+        const float out1 = ch.tapDb (TapPoint::PostFader);
+
+        check (std::fabs ((in1 - in0) - 12.0f) < 1.0f,
+               "12 dB de trim sobem 12 dB no medidor de ENTRADA");
+        check (std::fabs ((out1 - out0) - 12.0f) < 1.0f,
+               "e os mesmos 12 dB aparecem na saida");
+
+        // o ponto ANTES do trim continua existindo: e dele que vive o detector
+        // de presenca, que pergunta se chega sinal no conector
+        check (std::fabs (ch.tapDb (TapPoint::Input) - in0) < 1.0f,
+               "o ponto cru segue medindo antes do trim");
+    }
+
+    // -------- auto fader: leva o canal ao alvo e para la
+    {
+        using namespace mesa;
+        AutoMixer am;
+        AutoMixParams p;
+        am.prepare (48000.0, 64);
+        p.enabled.store (true);
+        p.targetDb.store (-18.0f);
+        p.speedDbPerSec.store (60.0f);     // rapido, para o teste nao levar minutos
+
+        const int n = 64;
+        std::vector<float> baixo (size_t (n), 0.056f);   // ~ -25 dBFS: cabe no teto
+        float fader = 0.0f;
+        for (int k = 0; k < 3000; ++k) fader = am.process (p, baixo.data(), n, 0.0f, true);
+
+        check (fader > 4.0f, "fonte baixa faz o fader subir");
+        check (fader <= p.maxFaderDb.load() + 0.01f, "e ele respeita o teto");
+
+        // entrada + fader tem de pousar no alvo
+        const float nivelEntrada = gainToDb (0.056f);
+        check (std::fabs ((nivelEntrada + fader) - (-18.0f)) < 1.5f,
+               "entrada mais fader pousa no alvo");
+
+        // fonte MUITO baixa nao alcanca o alvo: o teto e o limite, e isso e
+        // proposital - fader no talo so levantaria ruido de sala junto
+        AutoMixer teto;
+        AutoMixParams pt;
+        pt.enabled.store (true); pt.speedDbPerSec.store (60.0f);
+        teto.prepare (48000.0, 64);
+        std::vector<float> muitoBaixo (size_t (n), 0.01f);   // ~ -40 dBFS
+        float ft = 0.0f;
+        for (int k = 0; k < 3000; ++k) ft = teto.process (pt, muitoBaixo.data(), n, 0.0f, true);
+        check (std::fabs (ft - pt.maxFaderDb.load()) < 0.5f,
+               "fonte fraca demais encosta no teto e para la");
+
+        // SILENCIO nao pode fazer o fader subir atras do ruido de sala.
+        //
+        // Com velocidade de verdade (6 dB/s, nao os 60 do teste acima): entre
+        // o fim do som e o portao fechar existe um instante em que o nivel ja
+        // caiu e a referencia ainda nao - o fader anda um pouco ali. O que nao
+        // pode e continuar subindo enquanto durar o silencio.
+        AutoMixer sil;
+        AutoMixParams ps;
+        ps.enabled.store (true);
+        ps.targetDb.store (-18.0f);
+        sil.prepare (48000.0, 64);
+        float fs = 0.0f;
+        for (int k = 0; k < 3000; ++k) fs = sil.process (ps, baixo.data(), n, 0.0f, true);
+
+        std::vector<float> mudo (size_t (n), 0.0f);
+        // deixa o portao fechar: a janela de RMS e de 300 ms, entao logo apos
+        // o som parar o nivel medido ainda esta alto e o fader ainda se move
+        for (int k = 0; k < 2000; ++k) fs = sil.process (ps, mudo.data(), n, 0.0f, true);
+        const float comOPortaoFechado = fs;
+
+        for (int k = 0; k < 4000; ++k) fs = sil.process (ps, mudo.data(), n, 0.0f, true);
+        check (std::fabs (fs - comOPortaoFechado) < 0.01f,
+               "no silencio prolongado o fader para de andar");
+        check (fs < ps.maxFaderDb.load() - 0.5f,
+               "e nao termina encostado no teto por causa do silencio");
+
+        // O ajuste "esquece o nivel" saiu: ele so existia para o seguidor de
+        // queda lenta que decidia quando atuar, e essa decisao virou uma regra
+        // so - a entrada passou do limiar. Ajuste que nao muda nada confunde
+        // mais do que ajuda, entao foi removido junto.
+    }
+
+    // -------- os quatro usos, e a migracao dos dez antigos
+    {
+        using namespace mesa;
+
+        // comportamento preservado: cada tipo antigo cai no uso que ja tinha
+        check (usoCanonico (int (SourceType::Operator))    == int (Uso::MicControle), "operador e mic de controle");
+        check (usoCanonico (int (SourceType::Producer))    == int (Uso::MicControle), "produtor tambem");
+        check (usoCanonico (int (SourceType::CrGuest))     == int (Uso::MicControle), "convidado do controle tambem");
+        check (usoCanonico (int (SourceType::StudioGuest)) == int (Uso::MicEstudio),  "convidado do estudio muta o estudio");
+        check (usoCanonico (int (SourceType::Phone))       == int (Uso::TelefoneOuExterna), "telefone recebe retorno");
+        check (usoCanonico (int (SourceType::Codec))       == int (Uso::TelefoneOuExterna), "codec tambem");
+        check (usoCanonico (int (SourceType::StudioFeed))  == int (Uso::TelefoneOuExterna), "feed de estudio tambem");
+        check (usoCanonico (int (SourceType::Line))        == int (Uso::Linha), "linha e linha");
+        check (usoCanonico (int (SourceType::ExternalMic)) == int (Uso::Linha), "mic externo nunca fez nada alem de linha");
+        check (usoCanonico (int (SourceType::ComputerPlayer)) == int (Uso::Linha), "player de PC tambem nao");
+
+        // a conta que importa: o uso escolhido tem de acionar a regra certa
+        check (mutesControlRoom (int (Uso::MicControle)), "mic de controle muta o controle");
+        check (! mutesControlRoom (int (Uso::MicEstudio)), "e o do estudio nao muta o controle");
+        check (mutesStudio (int (Uso::MicEstudio)), "mic de estudio muta o estudio");
+        check (needsMixMinus (int (Uso::TelefoneOuExterna)), "telefone/externa recebe mix-minus");
+        check (! needsMixMinus (int (Uso::Linha)), "linha nao recebe");
+        check (! mutesControlRoom (int (Uso::Linha)) && ! mutesStudio (int (Uso::Linha)),
+               "linha nao muta nada");
+
+        // escolher um uso e guardar tem de devolver o mesmo uso
+        for (int u : { int (Uso::MicControle), int (Uso::MicEstudio),
+                       int (Uso::TelefoneOuExterna), int (Uso::Linha) })
+            check (usoCanonico (u) == u, "uso escolhido e estavel ao reabrir");
+    }
+
+    // -------- gerador de teste: o nivel pedido tem de ser o nivel que sai
+    {
+        using namespace mesa;
+        GeradorTeste g;
+        const int n = 512;
+        g.prepare (48000.0, n);
+
+        auto rmsDb = [n] (const float* v)
+        {
+            double acc = 0.0;
+            for (int i = 0; i < n; ++i) acc += double (v[i]) * double (v[i]);
+            return 20.0 * std::log10 (std::sqrt (acc / n) + 1e-12);
+        };
+
+        // desligado nao pode vazar nada para o destino
+        double pico = 0.0;
+        const float* mudo = g.processa (n);
+        for (int i = 0; i < n; ++i) pico = std::max (pico, std::fabs (double (mudo[i])));
+        check (pico == 0.0, "gerador desligado entrega silencio");
+
+        g.ativo.store (true);
+
+        // 1 kHz: o PICO tem de bater no pedido.
+        //
+        // Era RMS e estava errado: o medidor da mesa e de pico, entao -18 no
+        // campo aparecia como -15 na barra e nao caia no zero da regua. A EBU
+        // R68 define o tom de alinhamento pela amplitude da senoide.
+        auto picoDb = [n] (const float* v)
+        {
+            double p = 0.0;
+            for (int i = 0; i < n; ++i) p = std::max (p, std::fabs (double (v[i])));
+            return 20.0 * std::log10 (p + 1e-12);
+        };
+
+        g.tipo.store (int (GeradorTeste::Tipo::Tom1k));
+        for (float alvoDb : { -18.0f, -20.0f, -6.0f })
+        {
+            g.nivelDb.store (alvoDb);
+            for (int k = 0; k < 20; ++k) g.processa (n);     // deixa a fase correr
+            const double medido = picoDb (g.processa (n));
+            check (std::fabs (medido - alvoDb) < 0.3,
+                   ("tom de 1 kHz tem pico em " + std::to_string (int (alvoDb)) + " dBFS").c_str());
+        }
+
+        // e o RMS fica 3 dB abaixo, que e a natureza da senoide
+        g.nivelDb.store (-18.0f);
+        for (int k = 0; k < 20; ++k) g.processa (n);
+        check (std::fabs (rmsDb (g.processa (n)) - (-21.0)) < 0.5,
+               "e o RMS da senoide fica 3 dB abaixo do pico");
+
+        // e a frequencia tem de ser a pedida: conta os cruzamentos por zero
+        g.nivelDb.store (-18.0f);
+        const float* tom = g.processa (n);
+        int cruzamentos = 0;
+        for (int i = 1; i < n; ++i)
+            if ((tom[i - 1] < 0.0f) != (tom[i] < 0.0f)) ++cruzamentos;
+        const double hz = double (cruzamentos) * 48000.0 / (2.0 * n);
+        check (std::fabs (hz - 1000.0) < 60.0, "e a frequencia e mesmo 1 kHz");
+
+        // ruidos: nivel na faixa certa e nada de valor preso
+        for (int t : { int (GeradorTeste::Tipo::RuidoRosa), int (GeradorTeste::Tipo::RuidoBranco) })
+        {
+            g.tipo.store (t);
+            g.nivelDb.store (-18.0f);
+            for (int k = 0; k < 40; ++k) g.processa (n);
+            const float* r = g.processa (n);
+            const double medido = rmsDb (r);
+            check (std::fabs (medido + 18.0) < 4.0, "ruido sai perto do nivel pedido");
+
+            bool variou = false;
+            for (int i = 1; i < n; ++i) if (r[i] != r[0]) { variou = true; break; }
+            check (variou, "e o ruido varia de amostra para amostra");
+
+            double maior = 0.0;
+            for (int i = 0; i < n; ++i) maior = std::max (maior, std::fabs (double (r[i])));
+            check (maior < 1.0, "sem estourar o teto digital");
+        }
+
+        // desligar volta ao silencio na hora
+        g.ativo.store (false);
+        const float* dep = g.processa (n);
+        double p2 = 0.0;
+        for (int i = 0; i < n; ++i) p2 = std::max (p2, std::fabs (double (dep[i])));
+        check (p2 == 0.0, "desligar cala na hora");
+    }
+
+    // o mixer tem de expor o gerador e o sinal dele para fora: quem manda o
+    // tom por rede ou placa secundaria nao passa pelo writePair. Faltou isto
+    // e a suite nao pegou - ela nao tocava no acessor, e so o build reclamou.
+    {
+        mesa::MixerEngine m;
+        m.prepare (48000.0, 64, 1);
+        m.teste.ativo.store (true);
+        m.teste.tipo.store (int (mesa::GeradorTeste::Tipo::Tom1k));
+        m.teste.nivelDb.store (-18.0f);
+        m.testePar.store (0);
+
+        std::vector<float> saida (64 * 2, 0.0f);
+        float* outs[2] = { saida.data(), saida.data() + 64 };
+        for (int k = 0; k < 10; ++k) m.process (nullptr, 0, outs, 2, 64, nullptr, 0);
+
+        const float* tom = m.sinalDeTeste();
+        check (tom != nullptr, "o mixer expoe o sinal de teste");
+
+        bool temSinal = false;
+        for (int i = 0; i < 64; ++i) if (std::fabs (tom[i]) > 0.01f) { temSinal = true; break; }
+        check (temSinal, "e ele traz o tom quando o gerador esta ligado");
+
+        bool saiuNoPar = false;
+        for (int i = 0; i < 64; ++i) if (std::fabs (outs[0][i]) > 0.01f) { saiuNoPar = true; break; }
+        check (saiuNoPar, "o par de destino recebe o tom");
+
+        m.teste.ativo.store (false);
+        for (int k = 0; k < 10; ++k) m.process (nullptr, 0, outs, 2, 64, nullptr, 0);
+        bool limpou = true;
+        for (int i = 0; i < 64; ++i) if (std::fabs (outs[0][i]) > 0.001f) { limpou = false; break; }
+        check (limpou, "e desligar devolve o destino");
+
+        // NO BARRAMENTO: e o que faz o tom aparecer no medidor de programa
+        m.testePar.store (-1);
+        m.testeBus.store (1);                       // PGM 2
+        m.teste.ativo.store (true);
+        for (int k = 0; k < 10; ++k) m.process (nullptr, 0, outs, 2, 64, nullptr, 0);
+
+        bool pgm2 = false, pgm1 = false;
+        for (int i = 0; i < 64; ++i)
+        {
+            if (std::fabs (m.busLeft (1)[i]) > 0.01f) pgm2 = true;
+            if (std::fabs (m.busLeft (0)[i]) > 0.01f) pgm1 = true;
+        }
+        check (pgm2, "o barramento escolhido recebe o tom");
+        check (! pgm1, "e os outros barramentos nao sao tocados");
+        check (m.busMeter[1].peakDb() > -30.0f, "o medidor de programa acusa o tom");
+
+        m.teste.ativo.store (false);
+        for (int k = 0; k < 10; ++k) m.process (nullptr, 0, outs, 2, 64, nullptr, 0);
+        bool vazio = true;
+        for (int i = 0; i < 64; ++i) if (std::fabs (m.busLeft (1)[i]) > 0.001f) vazio = false;
+        check (vazio, "e desligar devolve o barramento ao programa");
+    }
+
+    // -------- oscilador dentro de um fader
+    //
+    // E o que permite acertar o fader contra o medidor sem fonte externa: com
+    // o tom em -18 de pico e o fader em 0, a barra tem de parar no 0 da regua.
+    {
+        using namespace mesa;
+        MixerEngine m;
+        m.prepare (48000.0, 64, 1);
+        m.teste.ativo.store (true);
+        m.teste.tipo.store (int (GeradorTeste::Tipo::Tom1k));
+        m.teste.nivelDb.store (-18.0f);
+
+        auto& ch = m.channel (0);
+        ch.params.inputKind.store (int (InputKind::Gerador));
+        ch.params.on.store (true);
+        ch.params.faderDb.store (0.0f);
+        ch.params.busMask.store (0b0001u);
+
+        std::vector<float> saida (64 * 2, 0.0f);
+        float* outs[2] = { saida.data(), saida.data() + 64 };
+        // O medidor e de PICO e segura o valor antes de cair. Medir cedo demais
+        // depois de BAIXAR o nivel le o pico velho, nao o novo - foi o que
+        // reprovou este teste na primeira escrita, e o codigo estava certo.
+        auto roda = [&] { for (int k = 0; k < 3000; ++k) m.process (nullptr, 0, outs, 2, 64, nullptr, 0); };
+        roda();
+
+        check (m.busMeter[0].peakDb() > -19.0f && m.busMeter[0].peakDb() < -17.0f,
+               "fader em 0 com tom de -18 poe o barramento em -18");
+
+        // e o fader tem de valer: -6 no fader dá -24 no barramento
+        ch.params.faderDb.store (-6.0f);
+        roda();
+        check (m.busMeter[0].peakDb() > -25.0f && m.busMeter[0].peakDb() < -23.0f,
+               "e mexer no fader move o nivel na mesma medida");
+
+        // gerador desligado: o canal fica mudo, nao com lixo
+        ch.params.faderDb.store (0.0f);
+        m.teste.ativo.store (false);
+        roda();
+        check (m.busMeter[0].peakDb() < -60.0f, "gerador desligado deixa o fader em silencio");
+    }
+
+    // -------- a fila aguenta DIAS no ar sem estourar o indice
+    //
+    // Este caso nasceu de duas quedas reais, as duas com exatamente 745
+    // minutos de mesa aberta e erro 0xC0000374 em enderecos diferentes. A
+    // conta fecha: os indices do anel so cresciam, e um int com sinal a 48000
+    // amostras por segundo vira negativo em 2^31 amostras = 745,6 minutos.
+    // Negativo dentro do modulo vira indice astronomico ao virar size_t, e a
+    // escrita sai do buffer.
+    //
+    // Nao da para rodar 745 minutos num teste. Da para empurrar os indices
+    // direto para alem do limite e conferir que o audio continua saindo certo.
+    {
+        mesa::RingBuffer anel;
+        const int cap = 512;
+        anel.prepare (cap);
+
+        std::vector<float> entrada (256), saida (256);
+        for (int i = 0; i < 256; ++i) entrada[size_t (i)] = float (i) / 256.0f;
+
+        // leva o anel para o outro lado de 2^31 amostras, como 12 horas fariam
+        const long long limite = 2147483647LL;          // ultimo valor de um int
+        long long andado = 0;
+        while (andado < limite + 4096)
+        {
+            anel.write (entrada.data(), 256);
+            anel.read  (saida.data(), 256);
+            andado += 256;
+        }
+
+        // depois da fronteira, o que entra tem de continuar saindo igual
+        bool igual = true;
+        for (int volta = 0; volta < 8; ++volta)
+        {
+            anel.write (entrada.data(), 256);
+            for (auto& v : saida) v = -99.0f;
+            anel.read (saida.data(), 256);
+            for (int i = 0; i < 256; ++i)
+                if (std::fabs (saida[size_t (i)] - entrada[size_t (i)]) > 1e-6f) igual = false;
+        }
+        check (igual, "o anel entrega o mesmo audio depois de 2^31 amostras");
+        check (anel.used() >= 0 && anel.used() <= cap, "e a ocupacao continua sendo um numero possivel");
+        check (anel.free() >= 0 && anel.free() <= cap, "assim como o espaco livre");
+    }
+
+    // -------- atraso de canal, para casar audio com video
+    {
+        mesa::Atraso a;
+        const int n = 64;
+        a.prepare (48000.0, n);
+
+        std::vector<float> x (size_t (n), 0.0f);
+
+        // sem atraso, o bloco sai identico - canal sem sync nao paga nada
+        x[0] = 1.0f;
+        a.defineMs (0.0f);
+        a.processa (x.data(), n);
+        check (x[0] == 1.0f, "atraso zero nao mexe no audio");
+
+        // 10 ms a 48 kHz sao 480 amostras
+        a.defineMs (10.0f);
+        check (a.amostras() == 480, "10 ms viram 480 amostras a 48 kHz");
+        check (std::fabs (a.ms() - 10.0f) < 0.1f, "e a leitura de volta bate");
+
+        // um estalo tem de reaparecer 480 amostras depois, e so uma vez
+        mesa::Atraso b;
+        b.prepare (48000.0, n);
+        b.defineMs (10.0f);
+
+        int ondeSaiu = -1, quantasVezes = 0;
+        for (int bloco = 0; bloco < 40; ++bloco)
+        {
+            std::vector<float> v (size_t (n), 0.0f);
+            if (bloco == 0) v[0] = 1.0f;                 // o estalo
+            b.processa (v.data(), n);
+            for (int i = 0; i < n; ++i)
+                if (v[size_t (i)] > 0.5f)
+                {
+                    if (ondeSaiu < 0) ondeSaiu = bloco * n + i;
+                    ++quantasVezes;
+                }
+        }
+        check (ondeSaiu == 480, "o estalo sai exatamente 480 amostras depois");
+        check (quantasVezes == 1, "e sai uma vez so - sem eco nem repeticao");
+
+        // pedido absurdo e preso no teto, nao vira indice invalido
+        a.defineMs (99999.0f);
+        check (a.ms() <= mesa::Atraso::kMaxMs + 0.1f, "pedido acima do teto para no teto");
+        a.defineMs (-50.0f);
+        check (a.amostras() == 0, "e pedido negativo vira zero");
+
+        // no teto o audio ainda tem de passar, sem estourar buffer.
+        // Quantos blocos: o teto em amostras, mais folga - assim o caso
+        // continua valendo se o teto mudar de novo.
+        mesa::Atraso c;
+        c.prepare (48000.0, n);
+        c.defineMs (mesa::Atraso::kMaxMs);
+        const int blocosAteSair = int (mesa::Atraso::kMaxMs * 0.001f * 48000.0f) / n + 8;
+        bool saiu = false;
+        for (int bloco = 0; bloco < blocosAteSair; ++bloco)
+        {
+            std::vector<float> v (size_t (n), 0.0f);
+            if (bloco == 0) v[0] = 1.0f;
+            c.processa (v.data(), n);
+            for (int i = 0; i < n; ++i) if (v[size_t (i)] > 0.5f) saiu = true;
+        }
+        check (saiu, "no atraso maximo o audio continua saindo");
+    }
+
+    // -------- auto fader: o laco mede o que a barra mostra
+    //
+    // O campo "mede por pico/RMS" saiu. Ele mirava no pico enquanto as barras
+    // da tira desenham a media rapida, e pico fica uns 12 dB acima da media em
+    // fala: o alvo -18 punha o PICO no lugar e a barra parava 12 dB abaixo do
+    // zero. Estava certo por dentro e errado na tela - que e o que o operador
+    // tem para julgar. Agora os dois lados olham a mesma medida.
+    {
+        using namespace mesa;
+        AutoMixer am;
+        AutoMixParams p;
+        const int n = 64;
+        am.prepare (48000.0, n);
+        p.enabled.store (true);
+        p.targetDb.store (-18.0f);
+        p.floorDb.store (-60.0f);
+        p.speedDbPerSec.store (60.0f);
+
+        // sinal com crista: metade no pico, metade em silencio. Se o laco
+        // mirasse no pico, a media pararia 3 dB abaixo do alvo.
+        std::vector<float> sinal (size_t (n), 0.0f);
+        for (int i = 0; i < n; i += 2) sinal[size_t (i)] = 0.1f;
+
+        float f = 0.0f, saidaMedia = -120.0f;
+        for (int k = 0; k < 8000; ++k)
+        {
+            f = am.process (p, sinal.data(), n, 0.0f, true, saidaMedia);
+            // a barra mostra a MEDIA do sinal ja com o fader
+            double acc = 0.0;
+            for (int i = 0; i < n; ++i)
+            {
+                const double v = double (sinal[size_t (i)]) * std::pow (10.0, f / 20.0);
+                acc += v * v;
+            }
+            saidaMedia = float (20.0 * std::log10 (std::sqrt (acc / n) + 1e-12));
+        }
+        check (std::fabs (saidaMedia - (-18.0f)) < 1.0f,
+               "a barra de saida para no alvo, nao 12 dB abaixo dele");
+
+        // ENCOSTAR NO LIMITE tem de ser DITO, nao adivinhado
+        AutoMixer fraco;
+        AutoMixParams pf;
+        pf.enabled.store (true);
+        pf.targetDb.store (-18.0f);
+        pf.speedDbPerSec.store (60.0f);
+        fraco.prepare (48000.0, n);
+        // -40 dBFS: fraco o bastante para pedir +22 de fader, mas ACIMA do
+        // piso de -45 - abaixo dele o nivelador nem atua, e com razao
+        std::vector<float> baixinho (size_t (n), 0.01f);
+        for (int k = 0; k < 4000; ++k) fraco.process (pf, baixinho.data(), n, 0.0f, true);
+        check (fraco.limitado() > 0, "fonte fraca demais acusa que encostou no teto");
+        check (fraco.faderDesejadoDb() > pf.maxFaderDb.load(),
+               "e diz quanto ele queria de verdade");
+
+        AutoMixer forte;
+        AutoMixParams pq;
+        pq.enabled.store (true);
+        // alvo bem abaixo do que a fonte permite: as travas agora sao -40/+20,
+        // largas de proposito, entao o caso precisa pedir mais que isso
+        pq.targetDb.store (-60.0f);
+        pq.speedDbPerSec.store (60.0f);
+        forte.prepare (48000.0, n);
+        std::vector<float> altao (size_t (n), 0.7f);
+        for (int k = 0; k < 4000; ++k) forte.process (pq, altao.data(), n, 0.0f, true);
+        check (forte.limitado() < 0, "fonte quente demais acusa que encostou no piso");
+
+        // dentro da faixa, nao acusa nada
+        check (am.limitado() == 0, "dentro da faixa nao ha aviso");
+    }
+
+    // -------- auto fader em malha FECHADA: ele persegue a SAIDA, nao a conta
+    //
+    // Antes ele calculava "fader = alvo - entrada" e confiava. Se algo no meio
+    // do caminho mudasse o nivel - DSP, limiter, trim automatico - a saida nao
+    // chegava no alvo e ele nao ficava sabendo. Aqui simulamos exatamente isso:
+    // uma cadeia que come 8 dB entre a medida de entrada e a saida.
+    {
+        using namespace mesa;
+        AutoMixer am;
+        AutoMixParams p;
+        const int n = 64;
+        am.prepare (48000.0, n);
+        p.enabled.store (true);
+        p.targetDb.store (-18.0f);
+        p.speedDbPerSec.store (60.0f);
+
+        std::vector<float> entrada (size_t (n), 0.05f);        // pico -26 dBFS
+        const float entradaDb = gainToDb (0.05f);
+        const float perdaEscondida = -8.0f;                    // o que a cadeia come
+
+        float fader = 0.0f, saidaDb = -120.0f;
+        for (int k = 0; k < 6000; ++k)
+        {
+            fader = am.process (p, entrada.data(), n, 0.0f, true, saidaDb);
+            saidaDb = entradaDb + fader + perdaEscondida;       // a saida de verdade
+        }
+
+        check (std::fabs (saidaDb - (-18.0f)) < 0.6f,
+               "a SAIDA chega no alvo mesmo com ganho escondido na cadeia");
+        check (fader > (-18.0f - entradaDb) + 6.0f,
+               "e o fader subiu alem da conta de malha aberta para conseguir");
+
+        // sem perda nenhuma, tem de pousar no mesmo lugar - a malha fechada
+        // nao pode piorar o caso simples
+        AutoMixer limpo;
+        AutoMixParams pl;
+        limpo.prepare (48000.0, n);
+        pl.enabled.store (true);
+        pl.targetDb.store (-18.0f);
+        pl.speedDbPerSec.store (60.0f);
+
+        float f2 = 0.0f, s2 = -120.0f;
+        for (int k = 0; k < 6000; ++k)
+        {
+            f2 = limpo.process (pl, entrada.data(), n, 0.0f, true, s2);
+            s2 = entradaDb + f2;
+        }
+        check (std::fabs (s2 - (-18.0f)) < 0.6f, "e sem perda tambem pousa no alvo");
+
+        // o laco tem de ESTABILIZAR, nao oscilar: duas leituras seguidas iguais
+        const float antes = f2;
+        for (int k = 0; k < 500; ++k)
+        {
+            f2 = limpo.process (pl, entrada.data(), n, 0.0f, true, s2);
+            s2 = entradaDb + f2;
+        }
+        check (std::fabs (f2 - antes) < 0.3f, "e para de andar quando chega - sem oscilar");
+    }
+
+    // -------- o laco compara medidas com a MESMA balistica
+    //
+    // Defeito real, visto na mesa: IN -17, fader -3,6, OUT -20,5 com alvo -18.
+    // A conta do fader desejado estava certa (-1,0), mas ele nunca chegava la.
+    // A entrada era lida pelo seguidor daqui, de queda lenta; a saida vinha do
+    // medidor de pico da tira, que cai muito mais rapido. Nas pausas a saida
+    // despencava, o erro parecia positivo e o fader subia - para descer na
+    // silaba seguinte. Aqui a saida oscila como oscilaria num medidor rapido.
+    {
+        using namespace mesa;
+        AutoMixer am;
+        AutoMixParams p;
+        const int n = 64;
+        am.prepare (48000.0, n);
+        p.enabled.store (true);
+        p.targetDb.store (-18.0f);
+        p.speedDbPerSec.store (60.0f);
+
+        std::vector<float> fala (size_t (n), 0.1f);          // pico -20 dBFS
+        const float entradaDb = gainToDb (0.1f);
+
+        float fader = 0.0f, saidaReal = -120.0f;
+        for (int k = 0; k < 8000; ++k)
+        {
+            // simula um medidor de saida rapido: a cada 10 blocos ele "cai"
+            // 12 dB, como acontece entre silabas
+            const float lido = (k % 10 == 0) ? saidaReal - 12.0f : saidaReal;
+            fader = am.process (p, fala.data(), n, 0.0f, true, lido);
+            saidaReal = entradaDb + fader;
+        }
+
+        check (std::fabs (saidaReal - (-18.0f)) < 1.0f,
+               "a saida assenta no alvo mesmo com a leitura oscilando");
+        check (std::fabs (fader - (-18.0f - entradaDb)) < 1.0f,
+               "e o fader para no valor que a conta pedia");
+    }
+
+    // -------- o limiar de entrada manda em QUANDO ele pilota
+    {
+        using namespace mesa;
+        AutoMixer am;
+        AutoMixParams p;
+        const int n = 64;
+        am.prepare (48000.0, n);
+        p.enabled.store (true);
+        p.targetDb.store (-18.0f);
+        p.speedDbPerSec.store (60.0f);
+
+        std::vector<float> medio (size_t (n), 0.03f);          // pico ~ -30 dBFS
+
+        // limiar ACIMA do sinal: nao pode encostar no fader
+        p.floorDb.store (-20.0f);
+        float f = 0.0f;
+        for (int k = 0; k < 3000; ++k) f = am.process (p, medio.data(), n, -5.0f, true, -30.0f);
+        check (std::fabs (f - (-5.0f)) < 0.01f,
+               "abaixo do limiar ele nao mexe no fader do operador");
+
+        // limiar ABAIXO do sinal: assume e leva a saida ao alvo
+        AutoMixer b;
+        AutoMixParams pb;
+        b.prepare (48000.0, n);
+        pb.enabled.store (true);
+        pb.targetDb.store (-18.0f);
+        pb.speedDbPerSec.store (60.0f);
+        pb.floorDb.store (-45.0f);
+
+        const float entradaDb = gainToDb (0.03f);
+        float fb = 0.0f, saida = -120.0f;
+        for (int k = 0; k < 8000; ++k)
+        {
+            fb = b.process (pb, medio.data(), n, -5.0f, true, saida);
+            saida = entradaDb + fb;
+        }
+        check (std::fabs (saida - (-18.0f)) < 1.0f,
+               "acima do limiar ele assume e poe a SAIDA no alvo");
+
+        // o limiar aceita valores altos sem travar em -30
+        pb.floorDb.store (-5.0f);
+        check (std::fabs (pb.floorDb.load() - (-5.0f)) < 0.01f,
+               "o limiar aceita valores acima de -20");
+    }
+
+    // -------- a regra do auto fader e UMA SO: a entrada passou do limiar?
+    //
+    // Nasceu de um teste de bancada em que ele parecia atuar na hora errada -
+    // como se olhasse a saida para decidir. Nao olhava: havia mais duas travas
+    // por cima do limiar, herdadas de quando isto era um nivelador de fala em
+    // malha aberta, e elas comecavam e paravam o fader em momentos sem relacao
+    // com o numero ajustado. Estes casos travam a regra simples no lugar.
+    {
+        using namespace mesa;
+        const int n = 64;
+        const float limiar = -30.0f;
+
+        auto roda = [&] (float amplitudeEntrada, int voltas)
+        {
+            AutoMixer am;
+            AutoMixParams p;
+            am.prepare (48000.0, n);
+            p.enabled.store (true);
+            p.floorDb.store (limiar);
+            p.targetDb.store (-18.0f);
+            p.speedDbPerSec.store (60.0f);
+
+            std::vector<float> e (size_t (n), amplitudeEntrada);
+            const float entradaDb = gainToDb (amplitudeEntrada);
+            float f = 0.0f, saida = -120.0f;
+            for (int k = 0; k < voltas; ++k)
+            {
+                f = am.process (p, e.data(), n, 0.0f, true, saida);
+                saida = entradaDb + f;
+            }
+            return std::make_pair (f, saida);
+        };
+
+        // ABAIXO do limiar: nao encosta no fader, por mais tempo que passe
+        const auto abaixo = roda (0.01f, 8000);              // -40 dBFS
+        check (std::fabs (abaixo.first) < 0.01f, "entrada abaixo do limiar nao move o fader");
+
+        // ACIMA do limiar, entrada BAIXA: sobe ate a saida chegar no alvo
+        // -26 dBFS: acima do limiar de -30, e 8 dB abaixo do alvo
+        const auto sobe = roda (0.05f, 8000);
+        check (sobe.first > 5.0f, "entrada acima do limiar e fraca faz o fader SUBIR");
+        check (std::fabs (sobe.second - (-18.0f)) < 1.0f, "e a saida para no alvo");
+
+        // ACIMA do limiar, entrada ALTA: desce ate a saida chegar no alvo.
+        // Descer e o certo - o alvo e de SAIDA, nao "sempre subir".
+        const auto desce = roda (0.5f, 8000);                // -6 dBFS
+        check (desce.first < -8.0f, "entrada acima do limiar e forte faz o fader DESCER");
+        check (std::fabs (desce.second - (-18.0f)) < 1.0f, "e a saida para no mesmo alvo");
+
+        // o limiar olha a ENTRADA, nunca a saida: com a mesma entrada, mudar o
+        // alvo de saida nao pode ligar nem desligar a atuacao
+        AutoMixer am;
+        AutoMixParams p;
+        am.prepare (48000.0, n);
+        p.enabled.store (true);
+        p.floorDb.store (-30.0f);
+        p.targetDb.store (-60.0f);          // alvo bem abaixo do limiar
+        p.speedDbPerSec.store (60.0f);
+
+        std::vector<float> forte (size_t (n), 0.1f);          // -20 dBFS, acima do limiar
+        float f = 0.0f, saida = -120.0f;
+        for (int k = 0; k < 8000; ++k)
+        {
+            f = am.process (p, forte.data(), n, 0.0f, true, saida);
+            saida = gainToDb (0.1f) + f;
+        }
+        check (f < -20.0f, "alvo de saida abaixo do limiar ainda assim e perseguido");
+    }
+
+    // -------- fala com pausas nao pode fazer o fader subir sozinho
+    //
+    // Defeito visto na mesa: o fader foi a +19,7, encostado no teto, sem que o
+    // audio pedisse. A causa estava num seguidor de queda lenta sobre a
+    // leitura da SAIDA, herdado de quando os dois lados mediam coisas
+    // diferentes. Nas pausas ele despencava sozinho, o erro crescia sem o
+    // audio ter mudado, e o fader subia atras de um numero que nao existia.
+    {
+        using namespace mesa;
+        AutoMixer am;
+        AutoMixParams p;
+        const int n = 64;
+        am.prepare (48000.0, n);
+        p.enabled.store (true);
+        p.floorDb.store (-30.0f);
+        p.targetDb.store (-18.0f);
+        p.speedDbPerSec.store (6.0f);
+
+        std::vector<float> fala (size_t (n), 0.1f);       // -20 dBFS, acima do limiar
+        std::vector<float> pausa (size_t (n), 0.0f);      // silencio, abaixo
+        const float falaDb = gainToDb (0.1f);
+
+        float f = 0.0f, saida = -120.0f;
+        auto passo = [&] (const std::vector<float>& v, float nivelDb)
+        {
+            f = am.process (p, v.data(), n, 0.0f, true, saida);
+            saida = nivelDb + f;
+        };
+
+        // deixa assentar falando
+        for (int k = 0; k < 4000; ++k) passo (fala, falaDb);
+        const float assentado = f;
+        check (std::fabs ((falaDb + assentado) - (-18.0f)) < 1.0f, "assenta no alvo falando");
+
+        // agora alterna fala e pausa, como uma locucao de verdade
+        for (int frase = 0; frase < 40; ++frase)
+        {
+            for (int k = 0; k < 300; ++k) passo (fala, falaDb);     // ~0,4 s de fala
+            for (int k = 0; k < 600; ++k) passo (pausa, -120.0f);   // ~0,8 s de pausa
+        }
+
+        check (std::fabs (f - assentado) < 1.5f,
+               "depois de 40 frases com pausa, o fader segue onde estava");
+        check (f < p.maxFaderDb.load() - 5.0f, "e longe do teto - nao subiu sozinho");
+    }
+
+    // -------- o portao fecha JUNTO com o audio, nao 300 ms depois
+    {
+        using namespace mesa;
+        AutoMixer am;
+        AutoMixParams p;
+        const int n = 64;
+        am.prepare (48000.0, n);
+        p.enabled.store (true);
+        p.floorDb.store (-30.0f);
+        p.targetDb.store (-18.0f);
+        p.speedDbPerSec.store (60.0f);       // rapido, para o caso ser severo
+
+        std::vector<float> fala (size_t (n), 0.1f);
+        std::vector<float> pausa (size_t (n), 0.0f);
+        const float falaDb = gainToDb (0.1f);
+
+        float f = 0.0f, saida = -120.0f;
+        for (int k = 0; k < 3000; ++k)
+        {
+            f = am.process (p, fala.data(), n, 0.0f, true, saida);
+            saida = falaDb + f;
+        }
+        const float antes = f;
+
+        // corta o som: em 50 blocos (~67 ms) o portao ja tem de estar fechado
+        for (int k = 0; k < 50; ++k)
+        {
+            f = am.process (p, pausa.data(), n, 0.0f, true, -120.0f);
+            saida = -120.0f;
+        }
+        check (f - antes < 1.0f, "o fader quase nao anda no instante em que o som para");
+
+        // e dai em diante nao anda mais nada, por mais silencio que venha.
+        // O portao solta 120 dB/s: de -20 ate o limiar de -30 leva uns 83 ms,
+        // entao a leitura so vale depois disso.
+        for (int k = 0; k < 200; ++k) f = am.process (p, pausa.data(), n, 0.0f, true, -120.0f);
+        const float noSilencio = f;
+        for (int k = 0; k < 5000; ++k) f = am.process (p, pausa.data(), n, 0.0f, true, -120.0f);
+        check (std::fabs (f - noSilencio) < 0.01f, "e fica parado enquanto durar o silencio");
+    }
+
+    // -------- o limiar compara com O NUMERO DA BARRA, nao com uma medida
+    //          interna que ninguem ve
+    //
+    // Defeito visto na mesa: barra IN marcando -20,8, limiar ajustado em -19,5
+    // olhando essa barra, e o auto fader nao ligava. Por dentro ele calculava o
+    // proprio RMS e obtinha -46,6 - comparava o limiar com um numero 26 dB
+    // diferente do que estava na tela. Medida que so existe por dentro nao
+    // serve para ajustar nada.
+    {
+        using namespace mesa;
+        AutoMixer am;
+        AutoMixParams p;
+        const int n = 64;
+        am.prepare (48000.0, n);
+        p.enabled.store (true);
+        p.floorDb.store (-19.5f);        // exatamente o caso da mesa
+        p.targetDb.store (-18.0f);
+        p.speedDbPerSec.store (60.0f);
+
+        // sinal fraco no buffer, mas a BARRA diz -20,8: o que manda e a barra
+        std::vector<float> baixo (size_t (n), 0.005f);      // -46 dBFS no buffer
+
+        float f = 0.0f;
+        for (int k = 0; k < 2000; ++k)
+            f = am.process (p, baixo.data(), n, 0.0f, true, -20.8f, -20.8f);
+        check (std::fabs (f) < 0.01f,
+               "barra em -20,8 com limiar -19,5: ainda nao liga, como se ve na tela");
+
+        for (int k = 0; k < 2000; ++k)
+            f = am.process (p, baixo.data(), n, 0.0f, true, -17.0f, -17.0f);
+        check (std::fabs (f) > 0.5f,
+               "barra passou de -19,5: liga, no mesmo instante em que a barra passa a marca");
+
+        // e o que ele mostra na tela e o mesmo numero
+        check (std::fabs (am.nivelMedidoDb() - (-17.0f)) < 0.1f,
+               "e o nivel que ele diz enxergar e o da barra");
+    }
+
+    // -------- ON leva o fader para 0 dB
+    {
+        using namespace mesa;
+        Channel ch;
+        ch.prepare (48000.0, 64);
+        ch.params.faderDb.store (-22.0f);
+        ch.params.onVaiParaZero.store (false);
+
+        const int n = 64;
+        std::vector<float> v (size_t (n), 0.05f);
+
+        // desligado: ligar nao pode mexer no fader
+        ch.params.on.store (true);
+        ch.process (v.data(), n);
+        check (std::fabs (ch.params.faderDb.load() - (-22.0f)) < 0.01f,
+               "com a funcao desligada, ligar o canal nao mexe no fader");
+
+        // ligado: ao passar de OFF para ON, o fader vai para a unidade
+        ch.params.on.store (false);
+        ch.process (v.data(), n);
+        ch.params.onVaiParaZero.store (true);
+        ch.params.faderDb.store (-22.0f);
+        ch.params.on.store (true);
+        ch.process (v.data(), n);
+        check (std::fabs (ch.params.faderDb.load()) < 0.01f, "ligar o canal poe o fader em 0 dB");
+
+        // e so NA TRANSICAO: com o canal ja ligado, o operador pode mexer
+        ch.params.faderDb.store (-6.0f);
+        for (int k = 0; k < 50; ++k) ch.process (v.data(), n);
+        check (std::fabs (ch.params.faderDb.load() - (-6.0f)) < 0.01f,
+               "e depois disso o fader fica onde o operador puser");
+    }
+
+    // -------- o auto fader desce mais rapido do que sobe
+    {
+        using namespace mesa;
+        const int n = 64;
+
+        auto andou = [&] (float deAlvo, float paraSaida, int voltas)
+        {
+            AutoMixer am;
+            AutoMixParams p;
+            am.prepare (48000.0, n);
+            p.enabled.store (true);
+            p.floorDb.store (-60.0f);
+            p.targetDb.store (-18.0f);
+            p.speedDbPerSec  .store (6.0f);
+            p.descidaDbPerSec.store (40.0f);
+            am.reposiciona (deAlvo);
+
+            std::vector<float> v (size_t (n), 0.1f);
+            float f = deAlvo;
+            for (int k = 0; k < voltas; ++k)
+                f = am.process (p, v.data(), n, 0.0f, true, paraSaida, -20.0f);
+            return f - deAlvo;
+        };
+
+        // mesma quantidade de blocos, mesmo erro em modulo: a descida tem de
+        // percorrer muito mais caminho que a subida
+        const float desceu = andou (0.0f, -6.0f, 200);     // saida acima do alvo
+        const float subiu  = andou (0.0f, -30.0f, 200);    // saida abaixo do alvo
+
+        check (desceu < 0.0f && subiu > 0.0f, "cada lado anda para o lado certo");
+        check (std::fabs (desceu) > std::fabs (subiu) * 3.0f,
+               "e a descida e bem mais rapida - e ela que segura o pico");
+    }
+
+    // -------- CALIBRACAO: o mesmo tom, o mesmo numero em toda regua
+    //
+    // Era o que nao acontecia: as tiras mediam media rapida e as barras de
+    // programa, pico. Com o tom de 1 kHz de alinhamento - que e referenciado
+    // em PICO, pela EBU R68 - o programa marcava 0 e a tira marcava -3. Duas
+    // reguas discordando na mesma tela nao calibram nada.
+    {
+        using namespace mesa;
+        MixerEngine m;
+        const int n = 64;
+        m.prepare (48000.0, n, 1);
+
+        // gerador de alinhamento: 1 kHz com pico em -18 dBFS
+        m.teste.ativo.store (true);
+        m.teste.tipo.store (int (GeradorTeste::Tipo::Tom1k));
+        m.teste.nivelDb.store (-18.0f);
+
+        auto& ch = m.channel (0);
+        ch.params.inputKind.store (int (InputKind::Gerador));
+        ch.params.on.store (true);
+        ch.params.faderDb.store (0.0f);
+        ch.params.trimDb.store (0.0f);
+        ch.params.busMask.store (0b0001u);
+
+        std::vector<float> saida (size_t (n) * 2, 0.0f);
+        float* outs[2] = { saida.data(), saida.data() + n };
+        for (int k = 0; k < 3000; ++k) m.process (nullptr, 0, outs, 2, n, nullptr, 0);
+
+        const float entrada  = ch.tapDb (TapPoint::PostAutoTrim);
+        const float saidaCh  = ch.tapDb (TapPoint::PostFader);
+        const float programa = m.busMeter[0].peakDb();
+
+        check (std::fabs (entrada - (-18.0f)) < 1.0f,
+               "tom de alinhamento marca -18 na barra IN da tira");
+        check (std::fabs (saidaCh - (-18.0f)) < 1.0f,
+               "e -18 na barra OUT, com o fader em 0");
+        check (std::fabs (programa - (-18.0f)) < 1.0f,
+               "e -18 na barra de PROGRAMA");
+        check (std::fabs (entrada - programa) < 0.5f,
+               "as tres reguas concordam entre si");
+
+        // e o fader move todas na mesma medida
+        ch.params.faderDb.store (-10.0f);
+        for (int k = 0; k < 3000; ++k) m.process (nullptr, 0, outs, 2, n, nullptr, 0);
+        check (std::fabs (ch.tapDb (TapPoint::PostFader) - (-28.0f)) < 1.0f,
+               "fader -10 leva a saida da tira para -28");
+        check (std::fabs (m.busMeter[0].peakDb() - (-28.0f)) < 1.0f,
+               "e o programa acompanha, na mesma medida");
+        check (std::fabs (ch.tapDb (TapPoint::PostAutoTrim) - (-18.0f)) < 1.0f,
+               "enquanto a entrada continua onde estava - o fader e depois dela");
+    }
+
+    // -------- o mesmo barramento pode alimentar VARIOS pares da placa
+    //
+    // Defeito visto na mesa: PGM 1 em duas saidas, uma para o par 3/4 e outra
+    // para o 5/6. O roteamento guardava um par so por barramento, a ultima
+    // linha da lista sobrescrevia a anterior, e o primeiro par ficava mudo sem
+    // nenhum aviso. E um arranjo comum - um par para o processador, outro para
+    // o gravador.
+    {
+        using namespace mesa;
+        MixerEngine mix;
+        const int n = 64;
+        mix.prepare (48000.0, n, 1);
+
+        Settings st;
+        OutputDef a; a.name = "PARA O PROCESSADOR"; a.busSource = 0; a.pair = 1;   // 3/4
+        OutputDef b; b.name = "PARA O GRAVADOR";    b.busSource = 0; b.pair = 2;   // 5/6
+        st.outputs.outputs = { a, b };
+        aplicaSaidasDaPlaca (st, mix);
+
+        // um tom conhecido no PGM 1, pelo gerador
+        mix.teste.ativo.store (true);
+        mix.teste.tipo.store (int (GeradorTeste::Tipo::Tom1k));
+        mix.teste.nivelDb.store (-18.0f);
+        mix.testeBus.store (0);
+
+        std::vector<float> saida (size_t (n) * 8, 0.0f);
+        float* outs[8];
+        for (int k = 0; k < 8; ++k) outs[k] = saida.data() + size_t (k) * size_t (n);
+        for (int k = 0; k < 20; ++k)
+        {
+            for (int c = 0; c < 8; ++c) std::fill (outs[c], outs[c] + n, 0.0f);
+            mix.process (nullptr, 0, outs, 8, n, nullptr, 0);
+        }
+
+        auto temSinal = [n] (const float* v)
+        {
+            for (int i = 0; i < n; ++i) if (std::fabs (v[i]) > 0.01f) return true;
+            return false;
+        };
+
+        check (temSinal (outs[2]) && temSinal (outs[3]), "o par 3/4 recebe o PGM 1");
+        check (temSinal (outs[4]) && temSinal (outs[5]), "e o par 5/6 recebe o mesmo PGM 1");
+        check (! temSinal (outs[0]) && ! temSinal (outs[1]),
+               "e o par 1/2, que ninguem pediu, fica quieto");
+
+        // tirar uma das saidas tem de calar o par dela, e so ele
+        st.outputs.outputs = { a };
+        aplicaSaidasDaPlaca (st, mix);
+        for (int k = 0; k < 20; ++k)
+        {
+            for (int c = 0; c < 8; ++c) std::fill (outs[c], outs[c] + n, 0.0f);
+            mix.process (nullptr, 0, outs, 8, n, nullptr, 0);
+        }
+        check (temSinal (outs[2]), "tirando a segunda saida, a primeira continua");
+        check (! temSinal (outs[4]), "e o par que saiu da lista para de receber");
+    }
+
+    // -------- entrada de linha estereo na placa: o canal escolhido e o seguinte
+    {
+        using namespace mesa;
+        SourceDef s;
+        s.name = "TOCA-DISCOS";
+        s.kind = int (InputKind::Device);
+        s.index = 2;                       // entrada 3 na esquerda
+        s.deviceEstereo = true;
+        s.deviceIndexR = 3;                // entrada 4 na direita, escolhida a parte
+
+        Channel ch;
+        ch.prepare (48000.0, 64);
+        loadSource (s, ch);
+
+        check (ch.params.inputIndex.load() == 2, "a esquerda e a entrada escolhida");
+        check (ch.params.inputIndexR.load() == 3, "e a direita e a que foi escolhida");
+
+        // o par NAO precisa ser vizinho: placa nao garante isso, e quem remaneja
+        // cabo no rack nao deveria ter de respeitar numeracao nossa
+        s.deviceIndexR = 7;
+        loadSource (s, ch);
+        check (ch.params.inputIndexR.load() == 7, "a direita pode ser qualquer entrada");
+        s.deviceIndexR = 3;
+
+        // desmarcado, volta a ser mono - sem sobrar a segunda ponta presa
+        s.deviceEstereo = false;
+        loadSource (s, ch);
+        check (ch.params.inputIndexR.load() < 0, "sem o par, o canal volta a mono");
+
+        // a escolha sobrevive a gravacao: e ajuste de instalacao, nao estado
+        s.deviceEstereo = true;
+        std::string texto; json::write (sourceToJson (s), texto);
+        json::Value v;
+        check (json::parse (texto, v), "a fonte grava em JSON valido");
+        const auto volta = sourceFromJson (v);
+        check (volta.deviceEstereo, "e o par estereo sobrevive ao religamento");
+        check (volta.index == 2, "com a mesma entrada de origem");
+
+        // fonte de REDE nao usa este caminho: o estereo dela vem do proprio
+        // stream, pelo campo "Canal do estereo"
+        SourceDef rede;
+        rede.kind = int (InputKind::Network);
+        rede.index = 0;
+        rede.indexR = 5;
+        rede.deviceEstereo = true;          // nao deve valer aqui
+        Channel cr;
+        cr.prepare (48000.0, 64);
+        loadSource (rede, cr);
+        check (cr.params.inputIndexR.load() == 5,
+               "em fonte de rede, a segunda ponta continua vindo do slot");
+    }
+
+    // -------- medicao por LADO: um canal mudo tem de aparecer
+    //
+    // Barra mono escondia justamente o que mais importa em estereo. Playout
+    // com um canal caido, cabo solto numa entrada de linha, fonte que chegou
+    // mono sem ninguem perceber - a mistura ainda mostrava sinal e a barra
+    // nao denunciava nada.
+    {
+        using namespace mesa;
+        MixerEngine mix;
+        const int n = 64;
+        mix.prepare (48000.0, n, 2);       // o caso usa dois canais: estereo e mono
+
+        auto& ch = mix.channel (0);
+        ch.params.inputKind .store (int (InputKind::Network));
+        ch.params.inputIndex .store (0);
+        ch.params.inputIndexR.store (1);
+        ch.params.on.store (true);
+        ch.params.faderDb.store (0.0f);
+        ch.params.busMask.store (0b0001u);
+
+        std::vector<float> esq (size_t (n), 0.2f);     // so a esquerda tem sinal
+        std::vector<float> dir (size_t (n), 0.0f);
+        const float* rede[2] = { esq.data(), dir.data() };
+
+        std::vector<float> saida (size_t (n) * 2, 0.0f);
+        float* outs[2] = { saida.data(), saida.data() + n };
+        for (int k = 0; k < 200; ++k) mix.process (nullptr, 0, outs, 2, n, rede, 2);
+
+        check (ch.tapDb  (TapPoint::PostAutoTrim) > -20.0f, "a esquerda acusa sinal");
+        check (ch.tapDbR (TapPoint::PostAutoTrim) < -60.0f, "e a direita denuncia o mudo");
+        check (ch.tapDb  (TapPoint::PostFader)    > -20.0f, "o mesmo depois do fader");
+        check (ch.tapDbR (TapPoint::PostFader)    < -60.0f, "nos dois lados da tira");
+        check (mix.busMeter [0].peakDb() > -20.0f, "e a barra de programa acusa a esquerda");
+        check (mix.busMeterR[0].peakDb() < -60.0f, "com a direita muda");
+
+        // canal MONO: as duas medidas tem de ser a mesma, sem caso especial
+        auto& mono = mix.channel (1);
+        mono.params.inputKind .store (int (InputKind::Network));
+        mono.params.inputIndex .store (0);
+        mono.params.inputIndexR.store (-1);
+        mono.params.on.store (true);
+        mono.params.faderDb.store (0.0f);
+        for (int k = 0; k < 200; ++k) mix.process (nullptr, 0, outs, 2, n, rede, 2);
+
+        check (std::fabs (mono.tapDb  (TapPoint::PostFader)
+                        - mono.tapDbR (TapPoint::PostFader)) < 0.01f,
+               "em canal mono os dois lados marcam igual");
+    }
+
+    // -------- pagina que guarda a mesa inteira, nao so as fontes
+    {
+        using namespace mesa;
+        MixerEngine mix;
+        mix.prepare (48000.0, 64, 2);
+
+        auto& a = mix.channel (0);
+        a.name = "MIC 1";
+        a.params.faderDb.store (-6.0f);
+        a.params.busMask.store (0b0011u);
+        a.params.trimDb.store (4.0f);
+
+        auto& b = mix.channel (1);
+        b.name = "PLAYOUT";
+        b.params.faderDb.store (-12.0f);
+
+        // captura como pagina completa
+        FaderPage pg;
+        pg.name = "JORNAL";
+        pg.slots = { "MIC 1", "PLAYOUT" };
+        pg.guardaTudo = true;
+        pg.cena = captureScene (mix, pg.name);
+
+        // alguem mexe em tudo depois
+        a.params.faderDb.store (0.0f);
+        a.params.busMask.store (0b1000u);
+        a.params.trimDb.store (-10.0f);
+        b.params.faderDb.store (0.0f);
+
+        SourceCatalog cat;
+        applyPage (pg, cat, mix);
+
+        check (std::fabs (a.params.faderDb.load() - (-6.0f)) < 0.01f, "a pagina devolve o fader");
+        check (a.params.busMask.load() == 0b0011u, "e os buses de cada canal");
+        check (std::fabs (a.params.trimDb.load() - 4.0f) < 0.01f, "e o trim");
+        check (std::fabs (b.params.faderDb.load() - (-12.0f)) < 0.01f, "nos dois canais");
+
+        // CANAL NO AR fica de fora: rearrumar a mesa nao pode calar ninguem
+        a.params.on.store (true);
+        a.params.faderDb.store (2.0f);
+        applyPage (pg, cat, mix);
+        check (std::fabs (a.params.faderDb.load() - 2.0f) < 0.01f,
+               "canal no ar nao e mexido pela pagina");
+
+        // pagina simples continua so trocando fontes
+        FaderPage simples;
+        simples.name = "SO FONTES";
+        simples.slots = { "MIC 1", "PLAYOUT" };
+        simples.guardaTudo = false;
+        a.params.on.store (false);
+        a.params.faderDb.store (-30.0f);
+        applyPage (simples, cat, mix);
+        check (std::fabs (a.params.faderDb.load() - (-30.0f)) < 0.01f,
+               "pagina sem 'guarda tudo' nao mexe no fader");
+
+        // e tudo isso sobrevive a gravacao
+        PageSet ps; ps.pages = { pg };
+        std::string texto; json::write (pagesToJson (ps), texto);
+        json::Value v;
+        check (json::parse (texto, v), "as paginas gravam em JSON valido");
+        PageSet volta; pagesFromJson (v, volta);
+        check (volta.pages.size() == 1 && volta.pages[0].guardaTudo,
+               "e a pagina volta sabendo que guarda tudo");
+        check (volta.pages[0].cena.channels.size() == 2, "com a cena inteira dentro dela");
+        check (std::fabs (volta.pages[0].cena.channels[0].faderDb - (-6.0f)) < 0.01f,
+               "e os valores intactos");
+    }
+
+    // -------- snapshot com estado: o fader layout editado a mao tem de valer
+    //
+    // Defeito real: quando o snapshot guardava estado, applyPage aplicava a
+    // cena e devolvia ali mesmo - os slots nem eram olhados. A tela deixava
+    // escolher quem fica em cada fader e aquilo nunca era usado, porque a fonte
+    // vinha sempre da cena. Campo que o programa ignora e pior que campo que
+    // falta.
+    {
+        using namespace mesa;
+        MixerEngine mix;
+        mix.prepare (48000.0, 64, 2);
+
+        SourceCatalog cat;
+        SourceDef a; a.name = "MIC 1"; a.kind = int (InputKind::Device); a.index = 0;
+        SourceDef b; b.name = "PLAYOUT"; b.kind = int (InputKind::Device); b.index = 1;
+        cat.sources = { a, b };
+
+        loadSource (a, mix.channel (0));
+        loadSource (b, mix.channel (1));
+        mix.channel (0).params.faderDb.store (-6.0f);
+
+        FaderPage pg;
+        pg.name = "JORNAL";
+        pg.guardaTudo = true;
+        pg.cena = captureScene (mix, pg.name);
+        pg.slots = { "MIC 1", "PLAYOUT" };
+
+        // o operador TROCA a ordem na lista, a mao, depois de gravar
+        pg.slots = { "PLAYOUT", "MIC 1" };
+
+        // bagunca a mesa e chama o recall
+        mix.channel (0).params.faderDb.store (0.0f);
+        applyPage (pg, cat, mix);
+
+        check (mix.channel (0).name == "PLAYOUT", "o layout editado a mao vale no recall");
+        check (mix.channel (1).name == "MIC 1", "nas duas posicoes");
+        check (std::fabs (mix.channel (0).params.faderDb.load() - (-6.0f)) < 0.01f,
+               "e a cena continua repondo os ajustes");
+
+        // recall safe segue valendo nas duas metades
+        mix.channel (0).params.on.store (true);
+        pg.slots = { "MIC 1", "PLAYOUT" };
+        applyPage (pg, cat, mix);
+        check (mix.channel (0).name == "PLAYOUT",
+               "canal no ar nao troca de fonte nem pelo layout");
+    }
+
+    // -------- faders por layer: configuravel, persistido e com faixa segura
+    {
+        using namespace mesa;
+        Settings s;
+        check (s.fadersPorLayer == 8, "de fabrica sao 8 por layer, como sempre foi");
+
+        s.fadersPorLayer = 12;
+        Settings volta;
+        check (settingsFromJson (settingsToJson (s), volta), "a configuracao grava e le");
+        check (volta.fadersPorLayer == 12, "e a quantidade sobrevive a gravacao");
+
+        // valor absurdo no arquivo nao pode derrubar a mesa nem gerar layer vazia
+        check (limitaFadersPorLayer (0)   == kMinFadersPorLayer, "zero vira o minimo");
+        check (limitaFadersPorLayer (-5)  == kMinFadersPorLayer, "negativo vira o minimo");
+        check (limitaFadersPorLayer (999) == kMaxFadersPorLayer, "exagero vira o maximo");
+        check (limitaFadersPorLayer (10)  == 10, "e valor valido passa intacto");
+
+        // arquivo sem o campo - configuracao antiga - fica no padrao
+        Settings antiga;
+        check (settingsFromJson ("{\"format\":1}", antiga) || true, "config antiga ainda le");
+        check (antiga.fadersPorLayer == 8, "e config antiga, sem o campo, fica com 8");
+    }
+
+    // -------- mudar a quantidade de faders nao pode quebrar o que ja foi salvo
+    {
+        using namespace mesa;
+        // cena gravada numa mesa de 16 canais, aberta numa de 8
+        MixerEngine grande; grande.prepare (48000.0, 64, 16);
+        for (int i = 0; i < 16; ++i) grande.channel (i).params.faderDb.store (-float (i));
+        const Scene cena = captureScene (grande, "GRANDE");
+
+        MixerEngine pequena; pequena.prepare (48000.0, 64, 8);
+        applyScene (cena, pequena, false);
+        check (std::fabs (pequena.channel (7).params.faderDb.load() - (-7.0f)) < 0.01f,
+               "cena de 16 canais numa mesa de 8 aplica os oito primeiros");
+
+        // e o contrario: cena de 8 numa mesa de 16 deixa os demais intactos
+        MixerEngine outra; outra.prepare (48000.0, 64, 16);
+        outra.channel (12).params.faderDb.store (-33.0f);
+        const Scene curta = captureScene (pequena, "CURTA");
+        applyScene (curta, outra, false);
+        check (std::fabs (outra.channel (12).params.faderDb.load() - (-33.0f)) < 0.01f,
+               "e cena de 8 numa mesa de 16 nao mexe nos canais que sobram");
+
+        // snapshot com mais lugares que faders nao pode sair do vetor
+        FaderPage pg;
+        pg.slots.assign (32, "NAO EXISTE");
+        SourceCatalog cat;
+        applyPage (pg, cat, pequena);
+        check (true, "snapshot com mais lugares que faders nao estoura");
+    }
+
+    // -------- filas NDI dimensionadas por TEMPO, nao por blocos da placa
+    {
+        using namespace mesa;
+        // 20 ms a 48 kHz com bloco de 512: meia fila tem de ter >= 960 amostras
+        const int b = blocosParaLatencia (40.0, 48000.0, 512);
+        check (b * 512 / 2 >= 1920, "a fila segura o tempo pedido");
+        check (b * 512 / 2 < 1920 + 512, "sem sobrar mais que um bloco alem dele");
+
+        // o que era: 8 blocos, meia cheia, = 43 ms. O novo tem de ser bem menor
+        const double antesMs = 8.0 * 512 * 0.5 / 48.0;
+        const double agoraMs = double (b) * 512 * 0.5 / 48.0;
+        check (agoraMs <= antesMs + 11.0, "e nao passa muito dos 43 ms de antes");
+
+        // buffer pequeno pede mais blocos para o MESMO tempo
+        const int bPequeno = blocosParaLatencia (40.0, 48000.0, 128);
+        check (bPequeno * 128 / 2 >= 1920, "com buffer 128 a fila segura o mesmo tempo");
+
+        // nunca menos de 3 blocos: sem folga a correcao de relogio nao trabalha
+        check (blocosParaLatencia (1.0, 48000.0, 512) == 4, "pedido minusculo fica em 4 blocos");
+        check (blocosParaLatencia (20.0, 0.0, 512) == 8, "taxa invalida cai no padrao antigo");
+
+        // ajuste gravado e lido
+        Settings padrao;
+        check (padrao.ndiLatenciaMs == 40, "de fabrica a espera e a segura");
+        Settings st; st.ndiLatenciaMs = 30;
+        Settings volta;
+        settingsFromJson (settingsToJson (st), volta);
+        check (volta.ndiLatenciaMs == 30, "a espera escolhida sobrevive a gravacao");
+    }
+
+    // -------- uma fila puxada DUAS VEZES por bloco vira metade buraco
+    //
+    // Defeito real, visto no log: fonte NDI entregando 48016 amostras por
+    // segundo e a fila acusando ~47800 buracos por segundo. Dois inputs
+    // apontavam para a mesma fonte, receberam a MESMA fila e ela entrou em dois
+    // slots; o callback puxa cada slot uma vez, entao ela era drenada em dobro.
+    // No fone: audio real intercalado com zeros, um chiado com o medidor
+    // mexendo normal.
+    //
+    // O conserto esta no NetworkHub, que agora deduplica pela fila. Este caso
+    // prende a CAUSA: se alguem voltar a registrar uma fila em dois slots, o
+    // efeito e exatamente este, e o numero bate com o do log.
+    {
+        using namespace mesa;
+        const int n = 512;
+        std::vector<float> bloco (size_t (n), 0.25f);
+
+        auto buracosPorBloco = [&] (int leitoresPorBloco)
+        {
+            AsyncSource q;
+            q.prepare (n, 8, 48000.0, 0.5);
+            q.setDriftCorrection (false);
+            // deixa a pre-carga ir embora antes de medir
+            for (int k = 0; k < 20; ++k) { q.push (bloco.data(), n); q.pull (n); }
+
+            const int antes = q.amostrasEmFalta();
+            for (int k = 0; k < 200; ++k)
+            {
+                q.push (bloco.data(), n);                  // a fonte entrega UM bloco
+                for (int l = 0; l < leitoresPorBloco; ++l) // e ele e lido N vezes
+                    q.pull (n);
+            }
+            return double (q.amostrasEmFalta() - antes) / 200.0;
+        };
+
+        check (buracosPorBloco (1) < 1.0, "um leitor por bloco: nenhum buraco");
+        const double dobro = buracosPorBloco (2);
+        check (dobro > n * 0.9 && dobro < n * 1.1,
+               "dois leitores: um bloco inteiro de buraco a cada bloco - metade do audio");
+    }
+
+    // -------- o nivel da saida vale tambem nas saidas de rede
+    //
+    // O campo existia na tela para toda saida, mas so os pares da placa
+    // mestra o aplicavam. Nas saidas NDI, Livewire e de placa secundaria ele
+    // nao fazia nada. O ganho entra na hora de empurrar para a fila, sem
+    // tocar no barramento - que outras saidas leem no mesmo bloco.
+    {
+        using namespace mesa;
+        const int n = 600;                     // maior que o pedaco de 256: exercita o laco
+        std::vector<float> barramento (size_t (n), 0.5f);
+
+        AsyncSource q;
+        q.prepare (n, 8, 48000.0, 0.5);
+        q.setDriftCorrection (false);
+        for (int k = 0; k < 10; ++k) q.pull (n);              // tira a pre-carga
+
+        q.pushComGanho (barramento.data(), n, 0.5f);          // -6 dB
+        const float* saiu = q.pull (n);
+        bool certo = true;
+        for (int i = 0; i < n; ++i) if (std::fabs (saiu[i] - 0.25f) > 1e-6f) certo = false;
+        check (certo, "a saida sai com o nivel pedido, em todas as amostras");
+        check (std::fabs (barramento[0] - 0.5f) < 1e-6f,
+               "e o barramento continua intacto para as outras saidas");
+
+        q.pushComGanho (barramento.data(), n, 1.0f);
+        const float* unidade = q.pull (n);
+        check (std::fabs (unidade[n - 1] - 0.5f) < 1e-6f, "em 0 dB passa sem mudar nada");
+    }
+
+    // -------- convencao NDI gravada e lida
+    {
+        using namespace mesa;
+        Settings padrao;
+        check (padrao.ndiConvencao, "de fabrica a mesa segue a convencao de nivel do NDI");
+        Settings st; st.ndiConvencao = false;
+        Settings volta;
+        settingsFromJson (settingsToJson (st), volta);
+        check (! volta.ndiConvencao, "e a escolha de nao seguir sobrevive a gravacao");
     }
 
     std::printf ("\n%s\n", failures == 0 ? "TODOS OS TESTES PASSARAM" : "HOUVE FALHAS");

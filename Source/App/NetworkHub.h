@@ -147,25 +147,79 @@ public:
             if (kv.second.queue == nullptr) continue;
             t << "  |  NDI " << juce::String (kv.first).substring (0, 18)
               << (kv.second.ocioso ? " (ocioso)" : "")
-              << " " << juce::String (int (kv.second.queue->amostrasPorSegundo())) << "/s"
+              << " recebe "
+              << juce::String (kv.second.receiver != nullptr
+                                   ? int (kv.second.receiver->amostrasPorSegundo()) : 0)
+              << "/s consome "
+              << juce::String (int (kv.second.queue->amostrasPorSegundo())) << "/s"
               << " buracos " << juce::String (kv.second.queue->amostrasEmFalta())
               << " puxadas-ruins " << juce::String (kv.second.queue->badPulls())
               << " ppm " << juce::String (kv.second.queue->correctionPpm(), 0)
+              << " fila " << juce::String (kv.second.queue->latencyMs(), 1) << " ms"
               << (kv.second.queue->driftSettled() ? "" : " NAO-ASSENTOU");
+        }
+
+        // SAIDAS NDI: quanto audio esta esperando antes de ir para a rede.
+        //
+        // Sem este numero, "a mesa atrasa 100 ms" nao tinha como virar conta:
+        // era possivel saber o que a fila DEVIA segurar, nao o que ela
+        // segurava de fato. Se a correcao de relogio deixar a fila encher, e
+        // aqui que aparece.
+        for (const auto& kv : ndiOut)
+        {
+            if (kv.second.tx == nullptr) continue;
+            double pior = 0.0;
+            for (const auto* q : { kv.second.left.get(), kv.second.right.get() })
+                if (q != nullptr) pior = std::max (pior, q->latencyMs());
+            t << "  |  NDI saida " << juce::String (kv.first).substring (0, 18)
+              << (kv.second.tx->ativo() ? "" : " (parada)")
+              << " " << juce::String (kv.second.tx->blocos()) << " blocos"
+              << " fila " << juce::String (pior, 1) << " ms";
         }
         return t;
     }
 
-    /** Estado dos receptores Livewire, para o batimento. */
+    /** Estado dos receptores Livewire, para o batimento.
+
+        Traz a LATENCIA DE CADA FILA em milissegundos. A barra mostra so o que
+        o driver da placa declara; o atraso das filas de rede ficava invisivel,
+        e sem numero a conversa sobre atraso vira palpite. Cada fila cobra o
+        que esta parado dentro dela: e o preco de absorver a diferenca de
+        relogio entre a rede e a placa. */
     juce::String estadoLivewire() const
     {
         juce::String t;
         for (const auto& kv : livewire)
+        {
             t << "  |  LW " << kv.first << " " << juce::String (kv.second.receiver->packets())
               << " pacotes carga " << juce::String (kv.second.receiver->cargaRecebida());
+
+            // so as filas COM LEITOR: as outras nem sao alimentadas, e
+            // incluir uma delas foi o que fez o registro acusar 80 ms de
+            // atraso que o audio nao tinha
+            double pior = 0.0;
+            const auto* rec = kv.second.receiver.get();
+            if (rec != nullptr)
+            {
+                if (rec->usandoL()    && kv.second.left  != nullptr)
+                    pior = std::max (pior, kv.second.left ->latencyMs());
+                if (rec->usandoR()    && kv.second.right != nullptr)
+                    pior = std::max (pior, kv.second.right->latencyMs());
+                if (rec->usandoSoma() && kv.second.soma  != nullptr)
+                    pior = std::max (pior, kv.second.soma ->latencyMs());
+            }
+            t << " fila " << juce::String (pior, 1) << " ms";
+        }
         for (const auto& kv : lwOut)
+        {
             t << "  |  LW saida " << kv.first << " "
               << juce::String (kv.second.sender->packets()) << " pacotes";
+
+            double pior = 0.0;
+            for (const auto* q : { kv.second.left.get(), kv.second.right.get() })
+                if (q != nullptr) pior = std::max (pior, q->latencyMs());
+            t << " fila " << juce::String (pior, 1) << " ms";
+        }
         return t;
     }
 
@@ -173,7 +227,18 @@ public:
         e escreve o slot de volta no SourceDef. */
     void rebind (mesa::SourceCatalog& catalog, double sampleRate, int blockSize)
     {
+        // Esquece o uso anterior. Sem isto, trocar um input de "soma" para
+        // "esquerdo" deixaria a soma marcada para sempre, e a fila sem leitor
+        // voltaria a encher.
+        for (auto& kv : livewire)
+            if (kv.second.receiver != nullptr) kv.second.receiver->defineUso (false, false, false);
+
         std::map<std::string, int> stillUsed;
+        // Qual slot ja leva cada FILA. A chave da fonte nao basta: um input
+        // Livewire estereo usa a fila do lado esquerdo, e outro input so no L
+        // do mesmo canal tem chave diferente e pegaria a mesma fila num
+        // segundo slot. O que nao pode repetir e a fila, entao e por ela.
+        std::map<mesa::AsyncSource*, int> slotDaFila;
         int slot = 0;
 
         for (auto& src : catalog.sources)
@@ -195,11 +260,42 @@ public:
             const std::string key = keyOf (src);
             if (key.empty()) { src.index = -1; continue; }
 
+            // MESMA FONTE EM DOIS INPUTS: MESMO SLOT, NAO DOIS.
+            //
+            // Cada input do catalogo ganhava um slot proprio. Dois inputs
+            // apontando para a mesma fonte de rede pediam a fila dela, recebiam
+            // a MESMA fila - e ela entrava em dois slots. O callback puxa cada
+            // slot uma vez por bloco, entao a fila era drenada em dobro: cada
+            // leitura levava metade do audio e a outra metade virava buraco.
+            //
+            // O log mostrou: a fonte NDI entregando 48 mil amostras por
+            // segundo e a fila acusando 48 mil buracos por segundo. No fone,
+            // audio real intercalado com zeros - um chiado com o medidor
+            // mexendo normal. E acontecia mesmo com um dos dois inputs fora de
+            // qualquer fader, porque o callback puxa todo slot registrado.
+            //
+            // Agora o segundo input reaproveita o slot do primeiro. Os dois
+            // leem o MESMO bloco ja puxado, que e o que significa ouvir a
+            // mesma fonte em dois lugares.
+            if (auto ja = stillUsed.find (key); ja != stillUsed.end())
+            {
+                src.index = ja->second;
+                auto jaR = stillUsed.find (key + "/R");
+                src.indexR = (jaR != stillUsed.end()) ? jaR->second : -1;
+                continue;
+            }
+
             mesa::AsyncSource* q = nullptr;
 
             if (src.livewireChannel > 0)
             {
-                q = livewireQueue (src.livewireChannel, src.livewireSide, sampleRate, blockSize);
+                // em estereo a esquerda usa o lado 0; a direita vem logo abaixo
+                q = livewireQueue (src.livewireChannel,
+                                   src.livewireSide == 3 ? 0 : src.livewireSide,
+                                   sampleRate, blockSize);
+                // depois de criar: marcar antes nao acharia o receptor e o
+                // canal ficaria mudo, que e pior que a fila cheia
+                marcaUso (src.livewireChannel, src.livewireSide);
             }
             else if (! src.streamName.empty())
             {
@@ -214,12 +310,69 @@ public:
                 q = (dev != nullptr) ? dev->source (src.deviceChannel) : nullptr;
             }
 
-            if (q == nullptr) { src.index = -1; continue; }
+            if (q == nullptr) { src.index = -1; src.indexR = -1; continue; }
 
-            engine.setNetSlot (slot, q);
-            src.index = slot;
-            stillUsed[key] = slot;
-            ++slot;
+            if (auto ja = slotDaFila.find (q); ja != slotDaFila.end())
+            {
+                src.index = ja->second;       // fila ja puxada: le o mesmo bloco
+                src.indexR = -1;
+                stillUsed[key] = ja->second;
+            }
+            else
+            {
+                engine.setNetSlot (slot, q);
+                slotDaFila[q] = slot;
+                src.index = slot;
+                src.indexR = -1;
+                stillUsed[key] = slot;
+                ++slot;
+            }
+
+            // NDI EM ESTEREO: a direita ocupa o slot seguinte, como no Livewire.
+            if (! src.streamName.empty() && src.livewireChannel <= 0
+                && slot < AudioEngine::kMaxNetSlots)
+            {
+                if (auto* qr = ndiQueueR (src.streamName))
+                {
+                    if (auto ja = slotDaFila.find (qr); ja != slotDaFila.end())
+                    {
+                        src.indexR = ja->second;
+                        stillUsed[key + "/R"] = ja->second;
+                    }
+                    else
+                    {
+                        engine.setNetSlot (slot, qr);
+                        slotDaFila[qr] = slot;
+                        src.indexR = slot;
+                        stillUsed[key + "/R"] = slot;
+                        ++slot;
+                    }
+                }
+            }
+
+            // ESTEREO: a segunda ponta ocupa um slot proprio. Nao ha tabela
+            // paralela para a direita - o canal guarda os dois indices e busca
+            // os dois na mesma tabela, que e a que ja existia.
+            if (src.livewireChannel > 0 && src.livewireSide == 3
+                && slot < AudioEngine::kMaxNetSlots)
+            {
+                if (auto* qr = livewireQueue (src.livewireChannel, 1, sampleRate, blockSize))
+                {
+                    if (auto ja = slotDaFila.find (qr); ja != slotDaFila.end())
+                    {
+                        src.indexR = ja->second;
+                        stillUsed[key + "/R"] = ja->second;
+                    }
+                    else
+                    {
+                        engine.setNetSlot (slot, qr);
+                        slotDaFila[qr] = slot;
+                        src.indexR = slot;
+                        stillUsed[key + "/R"] = slot;
+                        ++slot;
+                    }
+                }
+            }
         }
 
         for (int i = slot; i < AudioEngine::kMaxNetSlots; ++i)
@@ -229,13 +382,15 @@ public:
         // de terceiro no caminho. Ainda assim paramos a thread antes de soltar.
         for (auto it = livewire.begin(); it != livewire.end(); )
         {
-            const std::string k0 = "lw:" + std::to_string (it->first) + ":0";
-            const std::string k1 = "lw:" + std::to_string (it->first) + ":1";
-            const std::string k2 = "lw:" + std::to_string (it->first) + ":2";
-            if (stillUsed.find (k0) == stillUsed.end()
-                && stillUsed.find (k1) == stillUsed.end()
-                && stillUsed.find (k2) == stillUsed.end())
-            { it->second.receiver->stop(); it = livewire.erase (it); }
+            // Por PREFIXO, nao por lista de lados. A lista escrita na mao ja
+            // destruiu um receptor recem-criado - o do lado 3, estereo, que
+            // ninguem lembrou de acrescentar - deixando o motor com ponteiro
+            // solto e derrubando a mesa no primeiro bloco de audio.
+            bool emUso = false;
+            for (const auto& kv : stillUsed)
+                if (mesa::chaveEhDoCanal (kv.first, it->first)) { emUso = true; break; }
+
+            if (! emUso) { it->second.receiver->stop(); it = livewire.erase (it); }
             else ++it;
         }
 
@@ -255,6 +410,14 @@ public:
 
     /** Liga cada OutputDef de rede a um destino do motor. Mesma logica dos
         inputs, do outro lado: par de filas por destino. */
+    /** Nome da saida que o gerador de teste esta tomando. Vazio = nenhuma. */
+    std::string destinoDoTeste;
+
+    /** Espera por fila NDI, em ms. Vem da configuracao; vale para filas
+        criadas a partir de agora. Publico porque quem decide e o
+        MainComponent, na hora de religar a rede. */
+    double ndiLatenciaMs = 20.0;
+
     void rebindOutputs (mesa::OutputCatalog& outputs, const mesa::SourceCatalog& catalog,
                         double sampleRate, int blockSize)
     {
@@ -288,6 +451,7 @@ public:
 
             int dKind = 0, dIdx = -1;
             achaFonte (o.directSource, dKind, dIdx);
+            const bool ehTeste = ! o.name.empty() && o.name == destinoDoTeste;
             if (slot >= AudioEngine::kMaxNetSinks) break;
             // transmissao Livewire: a mesa vira fonte na rede Axia
             if (o.livewireChannel > 0)
@@ -317,12 +481,52 @@ public:
                     it = lwOut.emplace (o.livewireChannel, std::move (saida)).first;
                 }
                 engine.setNetSink (slot, it->second.left.get(), it->second.right.get(),
-                                   o.busSource, dKind, dIdx);
+                                   o.busSource, dKind, dIdx, o.mixMinusChannel, ehTeste, o.ganhoDb);
                 ++slot;
                 continue;
             }
 
-            if (o.deviceName.empty()) continue;   // envio por NDI ainda nao ligado
+            // TRANSMISSAO NDI: a mesa vira fonte na rede de video.
+            //
+            // Ate aqui a linha de baixo descartava qualquer saida sem placa,
+            // com o comentario "envio por NDI ainda nao ligado". O transmissor
+            // existia e ninguem o ligava: a saida aparecia na lista, parecia
+            // configurada, e o vMix nunca a via.
+            if (! o.streamName.empty())
+            {
+                const std::string nome = o.name.empty() ? std::string ("MESA") : o.name;
+                auto it = ndiOut.find (nome);
+                if (it == ndiOut.end())
+                {
+                    NdiSaida saida;
+                    saida.left  = std::make_unique<mesa::AsyncSource>();
+                    saida.right = std::make_unique<mesa::AsyncSource>();
+                    // a fila tem de comportar o bloco do NDI, independente do
+                    // buffer da placa - mesmo cuidado da saida Livewire
+                    const int blocoNdi = juce::jmax (blockSize, NdiTransmissor::kBloco);
+                    const int blocos = mesa::blocosParaLatencia (ndiLatenciaMs, sampleRate, blocoNdi);
+                    saida.left ->prepare (blocoNdi, blocos, sampleRate, 0.5);
+                    saida.right->prepare (blocoNdi, blocos, sampleRate, 0.5);
+                    saida.tx = std::make_unique<NdiTransmissor> (*saida.left, *saida.right);
+                    if (! saida.tx->start (nome, sampleRate))
+                    {
+                        lastNdiError = juce::String (saida.tx->ultimoErro());
+                        continue;
+                    }
+                    it = ndiOut.emplace (nome, std::move (saida)).first;
+                }
+                else if (it->second.tx != nullptr && it->second.tx->blocos() >= 0
+                         && ! it->second.tx->ativo())
+                {
+                    it->second.tx->start (nome, sampleRate);   // voltou para a lista
+                }
+                engine.setNetSink (slot, it->second.left.get(), it->second.right.get(),
+                                   o.busSource, dKind, dIdx, o.mixMinusChannel, ehTeste, o.ganhoDb);
+                ++slot;
+                continue;
+            }
+
+            if (o.deviceName.empty()) continue;
 
             auto* dev = secondaries.open (juce::String (o.deviceType.empty()
                                               ? std::string ("Windows Audio") : o.deviceType),
@@ -331,11 +535,30 @@ public:
 
             const int base = o.pair * 2;
             engine.setNetSink (slot, dev->sink (base), dev->sink (base + 1), o.busSource,
-                               dKind, dIdx);
+                               dKind, dIdx, o.mixMinusChannel, ehTeste, o.ganhoDb);
             ++slot;
         }
         for (int i = slot; i < AudioEngine::kMaxNetSinks; ++i)
             engine.setNetSink (i, nullptr, nullptr, 0);
+
+        // Saida NDI removida da lista para de ser ANUNCIADA - mas as filas
+        // ficam vivas.
+        //
+        // Apagar a entrada destruiria as filas enquanto o callback de audio
+        // ainda pode estar escrevendo nelas pelo ponteiro antigo: escrita em
+        // memoria devolvida, que e exatamente a corrupcao de heap que ja
+        // derrubou esta mesa. A saida Livewire nunca apaga as dela pelo mesmo
+        // motivo. Parado o transmissor, a fonte some do vMix; as filas custam
+        // alguns KB e voltam a servir se a saida for recriada com o mesmo nome.
+        for (auto& kv : ndiOut)
+        {
+            const bool aindaExiste = std::any_of (
+                outputs.outputs.begin(), outputs.outputs.end(),
+                [&kv] (const mesa::OutputDef& o)
+                { return ! o.streamName.empty()
+                      && (o.name.empty() ? std::string ("MESA") : o.name) == kv.first; });
+            if (! aindaExiste && kv.second.tx) kv.second.tx->stop();
+        }
     }
 
     /** Fecha so os receptores Livewire, para reabrirem na placa certa.
@@ -357,14 +580,23 @@ public:
         tira essa corrida do caminho. */
     void shutdown()
     {
+        // PRIMEIRO o motor esquece as filas, DEPOIS elas morrem.
+        //
+        // Estava na ordem contraria: os mapas eram limpos - destruindo as
+        // filas - e so entao o motor largava os ponteiros. Se o callback de
+        // audio ainda estivesse rodando, escrevia em memoria ja devolvida.
+        // Com mais saidas de rede, mais chance de cair justo nessa janela.
+        engine.clearNetSlots();
+        engine.clearNetSinks();
+
         for (auto& kv : ndi)      if (kv.second.receiver) kv.second.receiver->stop();
         for (auto& kv : livewire) if (kv.second.receiver) kv.second.receiver->stop();
         for (auto& kv : lwOut)    if (kv.second.sender)   kv.second.sender->stop();
+        for (auto& kv : ndiOut)   if (kv.second.tx)       kv.second.tx->stop();
         ndi.clear();
         livewire.clear();
         lwOut.clear();
-        engine.clearNetSlots();
-        engine.clearNetSinks();
+        ndiOut.clear();
     }
 
     /** Estado para a barra de status: placas perdidas e streams sem sinal. */
@@ -372,6 +604,7 @@ public:
     {
         auto v = secondaries.lostDevices();
         if (lastLivewireError.isNotEmpty()) v.push_back ("Livewire: " + lastLivewireError);
+        if (lastNdiError.isNotEmpty())      v.push_back ("NDI saida: " + lastNdiError);
         for (auto& kv : livewire)
             if (kv.second.receiver != nullptr && kv.second.receiver->packets() == 0)
                 v.push_back ("Livewire canal " + juce::String (kv.first)
@@ -401,6 +634,17 @@ private:
     };
     std::map<int, LwSaida> lwOut;
 
+    /** Saidas NDI, pelo NOME publicado. Cada saida vira uma fonte separada
+        na rede, e o vMix mostra cada uma com o nome que ela tem na lista. */
+    struct NdiSaida
+    {
+        std::unique_ptr<mesa::AsyncSource> left, right;
+        std::unique_ptr<NdiTransmissor> tx;
+    };
+    std::map<std::string, NdiSaida> ndiOut;
+
+    juce::String lastNdiError;
+
     struct LwSlot
     {
         std::unique_ptr<mesa::AsyncSource> left, right, soma;
@@ -421,22 +665,26 @@ private:
     struct NdiSlot
     {
         std::unique_ptr<mesa::AsyncSource> queue;
+        std::unique_ptr<mesa::AsyncSource> queueR;     // lado direito
         std::unique_ptr<NdiReceiver> receiver;
         bool ocioso = false;          // fora do catalogo, mas nao destruido
     };
 
-    static std::string keyOf (const mesa::SourceDef& s)
-    {
-        if (s.livewireChannel > 0)
-            return "lw:" + std::to_string (s.livewireChannel) + ":"
-                 + std::to_string (s.livewireSide);
-        if (! s.streamName.empty()) return "ndi:" + s.streamName;
-        if (! s.deviceName.empty()) return "dev:" + s.deviceName + ":"
-                                         + std::to_string (s.deviceChannel);
-        return {};
-    }
+    static std::string keyOf (const mesa::SourceDef& s) { return mesa::chaveDaFonte (s); }
 
     /** Um receptor por CANAL; os dois lados do estereo saem dele. */
+    /** Diz ao receptor quais pontas tem leitor. Acumula: dois inputs podem
+        pegar lados diferentes do mesmo canal. */
+    void marcaUso (int canal, int lado)
+    {
+        auto it = livewire.find (canal);
+        if (it == livewire.end() || it->second.receiver == nullptr) return;
+        auto& r = *it->second.receiver;
+        r.defineUso (r.usandoL()    || lado == 0 || lado == 3,
+                     r.usandoR()    || lado == 1 || lado == 3,
+                     r.usandoSoma() || lado == 2);
+    }
+
     mesa::AsyncSource* livewireQueue (int channel, int side, double sr, int block)
     {
         auto it = livewire.find (channel);
@@ -478,6 +726,13 @@ private:
         return it->second.left.get();
     }
 
+    /** Fila da direita de uma fonte NDI ja aberta. */
+    mesa::AsyncSource* ndiQueueR (const std::string& stream)
+    {
+        auto it = ndi.find (stream);
+        return it != ndi.end() ? it->second.queueR.get() : nullptr;
+    }
+
     mesa::AsyncSource* ndiQueue (const std::string& stream, double sr, int block)
     {
         auto it = ndi.find (stream);
@@ -485,11 +740,20 @@ private:
 
         NdiSlot s;
         s.queue = std::make_unique<mesa::AsyncSource>();
-        s.queue->prepare (block, 8, sr);
+        // dimensionada por TEMPO, nao por blocos da placa
+        s.queue->prepare (block, mesa::blocosParaLatencia (ndiLatenciaMs, sr, block), sr, 0.5);
         s.queue->name = stream;
         s.queue->kind = mesa::AsyncSource::Kind::Ndi;
 
+        // a direita, com a mesma medida: os dois lados tem de andar juntos,
+        // senao a imagem estereo escorrega com o tempo
+        s.queueR = std::make_unique<mesa::AsyncSource>();
+        s.queueR->prepare (block, mesa::blocosParaLatencia (ndiLatenciaMs, sr, block), sr, 0.5);
+        s.queueR->name = stream + " (R)";
+        s.queueR->kind = mesa::AsyncSource::Kind::Ndi;
+
         s.receiver = std::make_unique<NdiReceiver> (*s.queue, sr, block);
+        s.receiver->defineDireita (s.queueR.get());
         if (! s.receiver->start (stream)) return nullptr;
 
         auto* q = s.queue.get();

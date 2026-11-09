@@ -183,6 +183,28 @@ public:
             auto* r = sk.right.load (std::memory_order_relaxed);
 
             const float* srcL = nullptr; const float* srcR = nullptr;
+            const float g = sk.ganho.load (std::memory_order_relaxed);   // nivel da saida
+
+            // GERADOR DE TESTE na frente de tudo: quem o ligou quer o destino
+            // tomado, e nao o programa somado a um tom.
+            if (sk.teste.load (std::memory_order_relaxed)
+                && mixer.teste.ativo.load (std::memory_order_relaxed))
+            {
+                const float* tom = mixer.sinalDeTeste();
+                l->push (tom, numSamples);
+                if (r != nullptr) r->push (tom, numSamples);
+                continue;
+            }
+
+            // MIX-MINUS na frente dos demais: e o mais especifico deles.
+            const int mm = sk.mixMinus.load (std::memory_order_relaxed);
+            if (mm >= 0 && mm < mixer.numChannels())
+            {
+                srcL = mixer.backfeedData (mm);
+                l->pushComGanho (srcL, numSamples, g);
+                if (r != nullptr) r->pushComGanho (srcL, numSamples, g);
+                continue;
+            }
 
             // DIRECT OUT tem precedencia sobre o barramento: quem apontou uma
             // entrada quer aquela entrada, nao a mistura. Cru e mono nos dois
@@ -203,8 +225,8 @@ public:
                 srcR = srcL;
                 if (srcL != nullptr)
                 {
-                    l->push (srcL, numSamples);
-                    if (r != nullptr) r->push (srcR, numSamples);
+                    l->pushComGanho (srcL, numSamples, g);
+                    if (r != nullptr) r->pushComGanho (srcR, numSamples, g);
                 }
                 continue;
             }
@@ -220,8 +242,8 @@ public:
                 case 7: srcL = mixer.studioLeft(); srcR = mixer.studioRight();     break;
                 default: break;
             }
-            if (srcL != nullptr) l->push (srcL, numSamples);
-            if (r != nullptr && srcR != nullptr) r->push (srcR, numSamples);
+            if (srcL != nullptr) l->pushComGanho (srcL, numSamples, g);
+            if (r != nullptr && srcR != nullptr) r->pushComGanho (srcR, numSamples, g);
         }
 
         // decide cortes e enfileira comandos. Nao abre socket, nao aloca, nao trava.
@@ -322,6 +344,14 @@ public:
         /** Direct out: de que ENTRADA sai. -1 = usa o barramento. */
         std::atomic<int> fonteKind  { 0 };
         std::atomic<int> fonteIndex { -1 };
+        /** Mix-minus: de que CANAL sai o retorno. -1 = nenhum. */
+        std::atomic<int> mixMinus   { -1 };
+        /** Gerador de teste tomando este destino. */
+        std::atomic<bool> teste     { false };
+        /** Nivel da saida, linear. O campo existia na tela para toda saida,
+            mas so os pares da placa mestra o aplicavam - nas de rede ele nao
+            fazia nada. */
+        std::atomic<float> ganho    { 1.0f };
     };
 
     static constexpr int kMaxNetSinks = 16;
@@ -332,14 +362,20 @@ public:
         nome da fonte para este par e o NetworkHub, fora do callback.
 
         @param fonteKind   0 = placa principal, 1 = fila de rede
-        @param fonteIndex  -1 = sem direct out; o destino segue o barramento. */
+        @param fonteIndex  -1 = sem direct out; o destino segue o barramento.
+        @param mixMinus    canal cujo retorno sai aqui; -1 = nenhum. */
     void setNetSink (int i, mesa::AsyncSource* l, mesa::AsyncSource* r, int bus,
-                     int fonteKind = 0, int fonteIndex = -1) noexcept
+                     int fonteKind = 0, int fonteIndex = -1, int mixMinus = -1,
+                     bool teste = false, float ganhoDb = 0.0f) noexcept
     {
         if (i < 0 || i >= kMaxNetSinks) return;
+        netSink[size_t (i)].ganho.store (std::pow (10.0f, ganhoDb / 20.0f),
+                                         std::memory_order_relaxed);
+        netSink[size_t (i)].teste.store (teste, std::memory_order_relaxed);
         netSink[size_t (i)].busSource .store (bus, std::memory_order_relaxed);
         netSink[size_t (i)].fonteKind .store (fonteKind, std::memory_order_relaxed);
         netSink[size_t (i)].fonteIndex.store (fonteIndex, std::memory_order_relaxed);
+        netSink[size_t (i)].mixMinus  .store (mixMinus, std::memory_order_relaxed);
         netSink[size_t (i)].left .store (l, std::memory_order_relaxed);
         netSink[size_t (i)].right.store (r, std::memory_order_relaxed);
     }

@@ -4,6 +4,11 @@
 #include "../Core/Version.h"
 #include "../Core/Rastro.h"
 
+#if JUCE_WINDOWS
+ #include <mmsystem.h>
+ #pragma comment (lib, "winmm.lib")
+#endif
+
 /** Escala da interface — fora da classe para poder rodar ANTES de qualquer
 janela nascer, que e o que o JUCE pede. */
 /** Quanto encolher para a mesa caber nesta tela. */
@@ -62,6 +67,23 @@ public:
     void initialise (const juce::String&) override
     {
         mesa::rastroComeca();
+
+       #if JUCE_WINDOWS
+        // RELOGIO DO WINDOWS EM 1 MS.
+        //
+        // O padrao e 15,6 ms: toda thread que pede para dormir 10 ms pode
+        // acordar 15 depois. As threads de rede da mesa - receptor e
+        // transmissor NDI, transmissor Livewire - vivem de dormir no ritmo
+        // do audio, e cada acordada atrasada vira uma fila que seca e devolve
+        // silencio. O sintoma era o canal NDI com o medidor mexendo e so
+        // estalinhos no fone: quase tudo que saia da fila era o silencio de
+        // quem esperou demais.
+        //
+        // Todo programa de audio serio no Windows faz isto. O custo e um
+        // pouco mais de consumo de energia, que numa maquina de estudio
+        // ligada na tomada nao importa.
+        timeBeginPeriod (1);
+       #endif
         // Captura de queda: sem isso, um crash de madrugada nao deixa nada
         // alem do processo sumido. Com isso, fica o local exato no disco.
         juce::SystemStats::setApplicationCrashHandler ([] (void*)
@@ -109,6 +131,9 @@ public:
 
     void shutdown() override
     {
+       #if JUCE_WINDOWS
+        timeEndPeriod (1);     // devolve o relogio como estava
+       #endif
         auto f = juce::File::getSpecialLocation (juce::File::currentExecutableFile)
                     .getParentDirectory().getChildFile ("mesa.log");
         f.appendText (juce::Time::getCurrentTime().toString (true, true, true, true)
@@ -144,7 +169,7 @@ private:
             setTitleBarHeight (0);
             // a superficie diz de quantos canais precisa: 8 por camada, duas
             // camadas. Numero fixo aqui ja deixou o layer B pela metade.
-            setContentOwned (new MainComponent (MainComponent::kCanaisNecessarios), true);
+            setContentOwned (new MainComponent (MainComponent::canaisNecessarios()), true);
             setResizable (true, false);
             centreWithSize (getWidth(), getHeight());
             setVisible (true);

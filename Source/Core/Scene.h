@@ -22,6 +22,8 @@ struct ChannelScene
     int   inputKind  = int (InputKind::Device);
     int   sourceType = int (SourceType::Line);
     float trimDb = 0.0f, faderDb = -100.0f, panPos = 0.0f;
+    float atrasoMs = 0.0f;           // sync com video
+    bool  onVaiParaZero = false;     // ligar o canal poe o fader em 0 dB
     bool  on = false, mute = false, cue = false;
     unsigned busMask = 1u;
 
@@ -36,7 +38,8 @@ struct ChannelScene
     float gateThresholdDb = -45.0f;
 
     // mix-minus
-    int   feedSource = 0;
+    int   feedBusOn  = 0;
+    int   feedBusOff = 3;
     int   feedOutputPair = -1;
 
     bool  trigEnabled = false;
@@ -96,6 +99,8 @@ inline Scene captureScene (const MixerEngine& mix, const std::string& name)
         cs.inputKind  = c.params.inputKind.load();
         cs.sourceType = c.params.sourceType.load();
         cs.trimDb     = c.params.trimDb.load();
+        cs.atrasoMs   = c.params.atrasoMs.load();
+        cs.onVaiParaZero = c.params.onVaiParaZero.load();
         cs.faderDb    = c.params.faderDb.load();
         cs.panPos     = c.params.panPos.load();
         cs.on         = c.params.on.load();
@@ -106,7 +111,8 @@ inline Scene captureScene (const MixerEngine& mix, const std::string& name)
         cs.autoTrim         = c.params.autoTrim.enabled.load();
         cs.autoTrimTargetDb = c.params.autoTrim.targetDb.load();
 
-        cs.feedSource     = c.params.feedSource.load();
+        cs.feedBusOn      = c.params.feedBusOn .load();
+        cs.feedBusOff     = c.params.feedBusOff.load();
         cs.feedOutputPair = c.params.feedOutputPair.load();
 
         auto& rack = const_cast<Channel&> (c).rack;
@@ -180,6 +186,8 @@ inline int applyScene (const Scene& s, MixerEngine& mix, bool respectOnAir = tru
         c.params.inputKind .store (cs.inputKind);
         c.params.sourceType.store (cs.sourceType);
         c.params.trimDb    .store (cs.trimDb);
+        c.params.atrasoMs  .store (cs.atrasoMs);
+        c.params.onVaiParaZero.store (cs.onVaiParaZero);
         c.params.faderDb   .store (cs.faderDb);
         c.params.panPos    .store (cs.panPos);
         c.params.on        .store (cs.on);
@@ -190,7 +198,8 @@ inline int applyScene (const Scene& s, MixerEngine& mix, bool respectOnAir = tru
         c.params.autoTrim.enabled .store (cs.autoTrim);
         c.params.autoTrim.targetDb.store (cs.autoTrimTargetDb);
 
-        c.params.feedSource    .store (cs.feedSource);
+        c.params.feedBusOn     .store (cs.feedBusOn);
+        c.params.feedBusOff    .store (cs.feedBusOff);
         c.params.feedOutputPair.store (cs.feedOutputPair);
 
         if (! cs.dspOrder.empty()) c.rack.setOrder (cs.dspOrder);
@@ -225,7 +234,12 @@ inline int applyScene (const Scene& s, MixerEngine& mix, bool respectOnAir = tru
 
 // ---------------------------------------------------------------- json
 
-inline std::string sceneToJson (const Scene& s)
+/** A cena como VALOR, nao como texto.
+
+    Separado de sceneToJson porque a pagina guarda uma cena inteira dentro
+    dela: embutir texto JSON dentro de JSON obrigaria a escapar tudo e a
+    reparsear na leitura, e um erro de aspas viraria uma cena perdida. */
+inline json::Value sceneToValue (const Scene& s)
 {
     using namespace json;
     auto root = object();
@@ -260,6 +274,8 @@ inline std::string sceneToJson (const Scene& s)
         o.set ("inputKind",  num (c.inputKind));
         o.set ("sourceType", num (c.sourceType));
         o.set ("trimDb",     num (c.trimDb));
+        o.set ("atrasoMs",   num (c.atrasoMs));
+        o.set ("onZero",     boolean (c.onVaiParaZero));
         o.set ("faderDb",    num (c.faderDb));
         o.set ("panPos",     num (c.panPos));
         o.set ("on",         boolean (c.on));
@@ -273,7 +289,8 @@ inline std::string sceneToJson (const Scene& s)
         o.set ("autoTrim", at);
 
         auto fd = object();
-        fd.set ("source",     num (c.feedSource));
+        fd.set ("busOn",      num (c.feedBusOn));
+        fd.set ("busOff",     num (c.feedBusOff));
         fd.set ("outputPair", num (c.feedOutputPair));
         o.set ("mixMinus", fd);
 
@@ -317,13 +334,20 @@ inline std::string sceneToJson (const Scene& s)
         chans.arr.push_back (o);
     }
     root.set ("channels", chans);
-    return toString (root);
+    return root;
 }
 
-inline bool sceneFromJson (const std::string& src, Scene& out)
+inline std::string sceneToJson (const Scene& s)
 {
-    json::Value root;
-    if (! json::parse (src, root) || root.type != json::Value::Object) return false;
+    std::string out;
+    json::write (sceneToValue (s), out);
+    return out;
+}
+
+/** A cena a partir de um VALOR ja parseado. */
+inline bool sceneFromValue (const json::Value& root, Scene& out)
+{
+    if (root.type != json::Value::Object) return false;
     if (int (root.number ("format", 0)) > kSceneFormatVersion) return false;
 
     out = Scene{};
@@ -361,6 +385,8 @@ inline bool sceneFromJson (const std::string& src, Scene& out)
         c.inputKind  = int   (o.number ("inputKind", 0));
         c.sourceType = int   (o.number ("sourceType", int (SourceType::Line)));
         c.trimDb     = float (o.number ("trimDb", 0.0));
+        c.atrasoMs   = float (o.number ("atrasoMs", 0.0));
+        c.onVaiParaZero = o.boolean ("onZero", false);
         c.faderDb    = float (o.number ("faderDb", -100.0));
         c.panPos     = float (o.number ("panPos", 0.0));
         c.on         = o.boolean ("on");
@@ -375,7 +401,14 @@ inline bool sceneFromJson (const std::string& src, Scene& out)
         }
         if (auto* fd = o.find ("mixMinus"))
         {
-            c.feedSource     = int (fd->number ("source", 0));
+            // Cena antiga trazia um campo so ("source": 0 = auto, 1..4 = PGM
+            // fixo). Vira o par novo sem perder a intencao: o que estava
+            // escolhido passa a valer no ar, e fora do ar assume a
+            // comunicacao, que e o comportamento que faltava.
+            const int antigo = int (fd->number ("source", -1));
+            c.feedBusOn  = int (fd->number ("busOn",
+                                            antigo >= 1 ? double (antigo - 1) : 0.0));
+            c.feedBusOff = int (fd->number ("busOff", 3));
             c.feedOutputPair = int (fd->number ("outputPair", -1));
         }
         if (auto* lg = o.find ("logic"))
@@ -417,6 +450,14 @@ inline bool sceneFromJson (const std::string& src, Scene& out)
         out.channels.push_back (std::move (c));
     }
     return true;
+}
+
+/** A cena a partir do TEXTO, como antes. */
+inline bool sceneFromJson (const std::string& src, Scene& out)
+{
+    json::Value root;
+    if (! json::parse (src, root)) return false;
+    return sceneFromValue (root, out);
 }
 
 inline bool saveSceneToFile (const Scene& s, const std::string& path)

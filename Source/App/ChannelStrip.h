@@ -20,6 +20,12 @@ public:
     /** Segunda linha, menor: usada pelos botoes de layer ("LAYER 1-8"). */
     void setSub (juce::String t) { sub = std::move (t); repaint(); }
 
+    /** Marca de telefone no canto: diz que aquele barramento e o de
+        comunicacao com telefones e externas. Desenhada em vetor, e nao como
+        caractere, porque simbolo em fonte depende de codificacao e ja
+        apareceu quebrado na tela. */
+    void setMarcaTelefone (bool v) { if (marcaTel != v) { marcaTel = v; repaint(); } }
+
     void paint (juce::Graphics& g) override
     {
         auto r = getLocalBounds().toFloat();
@@ -42,6 +48,8 @@ public:
         g.drawRoundedRectangle (r, 3.0f, 1.0f);
         g.setColour (juce::Colours::white.withAlpha (0.07f));
         g.drawLine (r.getX() + 3.0f, r.getY() + 1.0f, r.getRight() - 3.0f, r.getY() + 1.0f, 1.0f);
+
+        if (marcaTel) desenhaTelefone (g);
 
         g.setColour (active ? juce::Colours::white.withAlpha (0.95f) : theme::btnText);
         g.setFont (theme::mono (fh));
@@ -67,10 +75,30 @@ public:
     }
 
 private:
+    /** Fone de ouvido classico: dois cantos arredondados e o arco ligando. */
+    void desenhaTelefone (juce::Graphics& g) const
+    {
+        auto r = getLocalBounds().toFloat().removeFromRight (14.0f)
+                     .withSizeKeepingCentre (9.0f, 9.0f);
+
+        juce::Path p;
+        const float e = r.getWidth() * 0.30f;      // grossura do corpo
+        p.addRoundedRectangle (r.getX(), r.getCentreY() - e * 0.5f, e, e * 1.6f, e * 0.35f);
+        p.addRoundedRectangle (r.getRight() - e, r.getCentreY() - e * 0.5f, e, e * 1.6f, e * 0.35f);
+        p.addCentredArc (r.getCentreX(), r.getCentreY(), r.getWidth() * 0.42f,
+                         r.getHeight() * 0.42f, 0.0f,
+                         -juce::MathConstants<float>::halfPi,
+                         juce::MathConstants<float>::halfPi, true);
+
+        g.setColour (active ? juce::Colours::white.withAlpha (0.85f)
+                            : theme::btnText.withAlpha (0.70f));
+        g.strokePath (p, juce::PathStrokeType (1.2f));
+    }
+
     juce::String txt, sub;
     juce::Colour acc;
     float fh;
-    bool active = false, down = false;
+    bool active = false, down = false, marcaTel = false;
 };
 
 /** Fader vertical desenhado como o do mockup: rasgo central, escala numerada
@@ -93,19 +121,40 @@ public:
 
         // Margem maior que a METADE do cap: no fim do curso ele precisa caber
         // inteiro dentro da caixa, senao some um pedaco.
-        const float top = 34.0f, bottom = r.getHeight() - 34.0f;
+        //
+        // O medidor ao lado usa a MESMA margem (theme::kFaderMargem): sem isso
+        // o curso do fader era recuado e a barra ocupava a coluna inteira,
+        // entao o mesmo dB caia em alturas diferentes nos dois - a regua da
+        // esquerda nao batia com a barra da direita.
+        const float top = theme::kFaderMargem;
+        const float bottom = r.getHeight() - theme::kFaderMargem;
         const float travel = bottom - top;
 
         // eixo do rasgo: a escala se apoia nele
         const float cx = r.getCentreX() + 11.0f;
 
-        // escala numerada
-        static const char* nums[] = { "+20", "+10", "0", "-10", "-20", "-30", "-40", "-\xe2\x88\x9e" };
+        // ESCALA NUMERADA, CADA NUMERO NA POSICAO DE VERDADE.
+        //
+        // Antes os rotulos eram distribuidos em espacamento igual, um a cada
+        // setimo do curso, enquanto o cap se movia pela escala real. Nunca
+        // corresponderam: o "-40" impresso caia a 6/7 do curso e o fader punha
+        // -40 a 1/4 dele. Por isso o cap parado em 0,0 nao ficava na marca do
+        // zero - e nao havia como ler a posicao pelo desenho.
+        //
+        // Agora cada rotulo e desenhado onde o proprio faderDbToPos o poe, e a
+        // faixa e a mesma dos medidores: o 0 daqui fica na altura do 0 da barra
+        // ao lado.
+        static const float dbs[] = { 10.0f, 0.0f, -10.0f, -20.0f, -30.0f, -40.0f };
+        static const char* nums[] = { "+10", "0", "-10", "-20", "-30", "-40", "-\xe2\x88\x9e" };
+        constexpr int kRotulos = 7;
+
         g.setFont (theme::mono (9.0f, true));
         g.setColour (theme::escalaTexto);
-        for (int i = 0; i < 8; ++i)
+        for (int i = 0; i < kRotulos; ++i)
         {
-            const float y = top + travel * (float (i) / 7.0f);
+            // o ultimo e o -infinito: fundo do curso
+            const float pos = (i < 6) ? theme::faderDbToPos (dbs[i]) : 0.0f;
+            const float y = bottom - travel * pos;
             g.drawText (juce::String::fromUTF8 (nums[i]),
                         juce::Rectangle<float> (2.0f, y - 6.0f, 24.0f, 12.0f),
                         juce::Justification::centredLeft, false);
@@ -114,14 +163,17 @@ public:
             g.setColour (theme::escalaTraco);
             g.fillRect (cx - 21.0f, y - 0.7f, 12.0f, 1.4f);
 
-            // dois tracos curtos entre um rotulo e o proximo, como regua
-            if (i < 7)
+            // tracos curtos ate o proximo rotulo, tambem na escala de verdade
+            if (i < 5)
+            {
+                const float yProx = bottom - travel * theme::faderDbToPos (dbs[i + 1]);
                 for (int k = 1; k <= 2; ++k)
                 {
-                    const float ym = y + (travel / 7.0f) * (float (k) / 3.0f);
+                    const float ym = y + (yProx - y) * (float (k) / 3.0f);
                     g.setColour (theme::escalaTraco.withAlpha (0.5f));
                     g.fillRect (cx - 16.0f, ym - 0.5f, 7.0f, 1.0f);
                 }
+            }
             g.setColour (theme::escalaTexto);
         }
 
@@ -159,6 +211,23 @@ public:
     void mouseDown (const juce::MouseEvent& e) override { drag (e); }
     void mouseDrag (const juce::MouseEvent& e) override { drag (e); }
 
+    /** Duplo clique volta a UNIDADE.
+
+        Convencao de mesa e de DAW, e sem ajuste nenhum: o destino e sempre 0
+        dB. Serve para desfazer uma mexida e para chegar na referencia sem
+        procurar a marca com o mouse - que e justamente o que se quer quando a
+        pressa aperta.
+
+        Nao passa pelo drag: o primeiro clique do duplo ja moveu o fader para
+        onde o cursor estava, e voltar ao zero por cima disso e o
+        comportamento certo. */
+    void mouseDoubleClick (const juce::MouseEvent&) override
+    {
+        pos = theme::faderDbToPos (0.0f);
+        repaint();
+        if (onDbChange) onDbChange (0.0f);
+    }
+
 private:
     void drag (const juce::MouseEvent& e)
     {
@@ -193,6 +262,8 @@ public:
         for (int b = 0; b < 4; ++b)
         {
             bus[b] = std::make_unique<SurfaceButton> ("PGM " + juce::String (b + 1), theme::busGreen);
+            // PGM 4 e o barramento de comunicacao de fabrica, como na Axia
+            bus[b]->setMarcaTelefone (b == mesa::kBusComunicacao);
             bus[b]->onClick = [this, b]
             {
                 const unsigned mask = ch.params.busMask.load();
@@ -301,9 +372,20 @@ public:
         auto subRow = o.removeFromTop (13);
         g.setFont (theme::mono (10.0f));
         g.setColour (theme::oledDim);
-        g.drawText ("TRIM", subRow, juce::Justification::centredLeft, false);
+        // MOSTRA O GANHO QUE ESTA VALENDO, nao so o que o operador digitou.
+        //
+        // Existe um auto-trim que soma por cima. Com ele ligado, o numero da
+        // tira nao era o ganho aplicado - a tela dizia 0.0 e a entrada podia
+        // estar com 12 dB a mais. Numero que nao corresponde ao audio e pior
+        // que numero nenhum: manda procurar problema no lugar errado.
+        const float trimOp  = ch.params.trimDb.load();
+        const float trimAut = ch.params.autoTrim.enabled.load() ? ch.autoTrimDb() : 0.0f;
+        const bool  temAuto = std::abs (trimAut) > 0.05f;
+
+        g.drawText (temAuto ? "IN TRIM +AUTO" : "IN TRIM",
+                    subRow, juce::Justification::centredLeft, false);
         g.setColour (theme::oled);
-        g.drawText (juce::String (ch.params.trimDb.load(), 1),
+        g.drawText (juce::String (trimOp + trimAut, 1),
                     subRow, juce::Justification::centredRight, false);
 
         const int cam = ch.params.trigger.camera.load();
@@ -318,9 +400,27 @@ public:
         // Antes eram duas barrinhas horizontais acima do fader, curtas demais
         // para julgar nivel. Na vertical acompanham o curso do fader e ficam no
         // campo de visao de quem opera, que e onde a mao ja esta.
-        drawVerticalMeter (g, meterInArea,  ch.tapDb (mesa::TapPoint::Input), true, false);
-        drawVerticalMeter (g, meterOutArea, ch.tapDb (mesa::TapPoint::PostFader), false,
+        // IN e DEPOIS do trim de entrada.
+        //
+        // Media antes, e por isso subir o Input trim gain nao mexia no medidor
+        // IN - so aparecia la no OUT, que e o contrario de como se usa o trim.
+        // Trim existe para trazer a fonte ao nivel certo, e o nivel certo se
+        // confere no medidor da entrada. Quem mede ANTES do trim continua
+        // sendo o detector de presenca e o calibrador, que perguntam outra
+        // coisa: "esta chegando sinal no conector?".
+        // A barra IN ganha a marca do LIMIAR do auto fader: sem ela, ajustar o
+        // numero era adivinhar onde ele cai na escala. Com marca, da para ver
+        // a barra passar do tracinho e o fader assumir no mesmo instante.
+        drawVerticalMeter (g, meterInArea,
+                           ch.tapDb  (mesa::TapPoint::PostAutoTrim),
+                           ch.tapDbR (mesa::TapPoint::PostAutoTrim), true, false,
+                           ch.params.autoMix.enabled.load()
+                               ? ch.params.autoMix.floorDb.load() : 1.0f);
+        drawVerticalMeter (g, meterOutArea,
+                           ch.tapDb  (mesa::TapPoint::PostFader),
+                           ch.tapDbR (mesa::TapPoint::PostFader), false,
                            ch.params.autoMix.enabled.load());
+        if (! escalaArea.isEmpty()) desenhaEscalaDbfs (g, escalaArea);   // some em tira estreita
 
         // ---- leitura do fader
         g.setColour (theme::faderWell);
@@ -432,11 +532,54 @@ public:
         dbReadout = r.removeFromBottom (24);
         r.removeFromBottom (6);
 
-        // par de medidores colado ao fader, ocupando a altura restante
-        auto meters = r.removeFromRight (34);
-        meterInArea  = meters.removeFromLeft (16);
-        meters.removeFromLeft (2);
-        meterOutArea = meters.removeFromLeft (16);
+        // par de medidores colado ao fader, com a ESCALA EM dBFS entre eles.
+        //
+        // Sem numeros, as barras diziam "mais" e "menos" e nada mais: nao dava
+        // para ver que o alvo do auto fader e -18, nem conferir se o trim pos
+        // a entrada onde devia. A escala fica no meio porque serve as duas -
+        // IN de um lado, OUT do outro, e o mesmo numero vale para as duas.
+        // MEDIDAS EM PIXEL INTEIRO.
+        //
+        // Eram 16 px por medidor: o corpo ficava com 14 e as duas colunas com
+        // 6,5 cada. Meio pixel nao existe na tela - o desenho arredonda cada
+        // coluna para um lado e elas saem com espessura e brilho diferentes,
+        // como se uma estivesse medindo outra coisa.
+        //
+        // 17 px dao corpo de 15: 7 + 1 de folga + 7. Inteiro e simetrico, e as
+        // duas colunas de cada medidor passam a ser identicas.
+        // O BLOCO DE MEDIDORES SE ADAPTA A LARGURA DA TIRA.
+        //
+        // Eram 56 px fixos. Com a quantidade de faders configuravel, uma tira
+        // de 16 por layer numa tela de 1920 fica com uns 90 px - e 56 fixos
+        // esmagavam o fader, que e justamente o que a mao usa. Em tira estreita
+        // sai primeiro a regua numerica do meio (a do fader continua, e diz a
+        // mesma coisa); se ainda faltar espaco, as barras afinam.
+        const int larguraTira = getWidth();
+        if (larguraTira >= 120)
+        {
+            auto meters = r.removeFromRight (56);
+            meterInArea  = meters.removeFromLeft (17);
+            meters.removeFromLeft (1);
+            escalaArea   = meters.removeFromLeft (20);
+            meters.removeFromLeft (1);
+            meterOutArea = meters.removeFromLeft (17);
+        }
+        else if (larguraTira >= 90)
+        {
+            auto meters = r.removeFromRight (36);
+            meterInArea  = meters.removeFromLeft (17);
+            meters.removeFromLeft (2);
+            escalaArea   = {};
+            meterOutArea = meters.removeFromLeft (17);
+        }
+        else
+        {
+            auto meters = r.removeFromRight (24);
+            meterInArea  = meters.removeFromLeft (11);
+            meters.removeFromLeft (2);
+            escalaArea   = {};
+            meterOutArea = meters.removeFromLeft (11);
+        }
         r.removeFromRight (4);
 
         fader.setBounds (r);
@@ -445,32 +588,102 @@ public:
 private:
     /** Medidor vertical na escala de OPERACAO: verde ate 0, ambar ate +10,
         vermelho acima. Le em dBFS e converte — o operador nunca ve dBFS. */
+    /** Escala ao lado das barras, na MESMA lingua do fader.
+
+        Os numeros sao os da escala de operacao - os mesmos +10, 0, -10 que
+        estao serigrafados ao lado do fader. Antes as barras vinham sem regua
+        nenhuma e, quando ganharam uma, ela falava dBFS: duas reguas com zeros
+        diferentes na mesma tela, e o operador traduzindo de cabeca.
+
+        A equivalencia e 0 de operacao = -18 dBFS (EBU R68). Os campos de
+        ajuste - alvo do auto fader, limiar, trigger - continuam em dBFS,
+        porque e a unidade em que se pensa nivel absoluto; a regua e para o
+        olho, e o olho procura o zero. */
+    void desenhaEscalaDbfs (juce::Graphics& g, juce::Rectangle<int> area)
+    {
+        // a regua acompanha a mesma margem das barras e do fader
+        auto r = area.toFloat().withTrimmedTop (theme::kFaderMargem)
+                               .withTrimmedBottom (theme::kFaderMargem);
+
+        // As marcas sao as MESMAS da escala de operacao do fader, so que
+        // escritas em dBFS. Duas reguas com zeros diferentes lado a lado
+        // obrigam o operador a traduzir de cabeca, e foi assim que a tela
+        // ficou: o fader marcando 0 e a barra marcando -20 na mesma altura.
+        // Agora o 0 de operacao e o -18 dBFS sao a mesma linha.
+        static const float marcas[] = { 0.0f, -8.0f, -18.0f, -28.0f, -38.0f, -48.0f, -58.0f };
+
+        g.setFont (theme::mono (8.0f));
+        for (float dbfs : marcas)
+        {
+            const float vu = theme::dbfsToVu (dbfs);
+            if (vu > theme::kMeterTopVu || vu < theme::kMeterBotVu) continue;
+
+            const float y = theme::vuToY (vu, r);
+            const bool  refOperacao = std::abs (dbfs - theme::kMeterRefDb) < 0.01f;
+
+            g.setColour (juce::Colours::white.withAlpha (refOperacao ? 0.30f : 0.12f));
+            g.fillRect (r.getX(), y - 0.5f, r.getWidth(), 1.0f);
+
+            g.setColour (refOperacao ? theme::oled : theme::oledDim);
+            g.drawText (juce::String (int (vu)),
+                        juce::Rectangle<float> (r.getX(), y - 5.0f, r.getWidth(), 10.0f),
+                        juce::Justification::centred, false);
+        }
+    }
+
+    /** Medidor vertical ESTEREO: duas colunas coladas, esquerda e direita.
+        Em canal mono os dois valores sao iguais e as colunas andam juntas. */
     void drawVerticalMeter (juce::Graphics& g, juce::Rectangle<int> area,
-                            float dbfs, bool comThreshold, bool comAlvoAuto)
+                            float dbfsL, float dbfsR, bool comThreshold, bool comAlvoAuto,
+                            float marcaLimiarDb = 1.0f)
     {
         auto r = area.toFloat();
         g.setColour (juce::Colour (0xff0a1014));
         g.fillRect (r);
 
-        auto corpo = r.reduced (1.0f, 1.0f);
-        const float vu = theme::dbfsToVu (dbfs);
+        // MESMA MARGEM DO FADER, para as alturas coincidirem.
+        //
+        // A barra ocupava a coluna toda enquanto o fader reservava espaco para
+        // o cap caber nas pontas. O 0 da regua da esquerda e o 0 da barra da
+        // direita ficavam em linhas diferentes, e nao dava para comparar os
+        // dois de relance - que e exatamente para o que servem lado a lado.
+        auto corpo = r.reduced (1.0f, 0.0f)
+                      .withTrimmedTop (theme::kFaderMargem)
+                      .withTrimmedBottom (theme::kFaderMargem);
+
+        // Duas colunas, com um fio de folga no meio.
+        //
+        // Barra unica escondia o que mais importa em estereo: um lado mudo.
+        // Playout com um canal caido ou cabo solto numa entrada de linha
+        // passavam despercebidos porque a mistura ainda mostrava sinal.
+        // larguras arredondadas para inteiro, e a folga do meio tirada das
+        // duas na mesma medida - senao uma coluna fica mais larga que a outra
+        const float largura = std::floor ((corpo.getWidth() - 1.0f) * 0.5f);
+        auto colL = corpo.withWidth (largura);
+        auto colR = corpo.withX (corpo.getRight() - largura).withWidth (largura);
 
         // Cor por SEGMENTO, nao pela barra inteira: verde ate 0, ambar de 0 a
         // +10, vermelho acima. Pintar tudo da cor do pico esconderia onde o
         // sinal esta — o operador leria "esta vermelho" em vez de "passou de
         // 0 ha pouco".
-        auto pinta = [&] (float de, float ate, juce::Colour c)
+        auto pintaColuna = [&] (juce::Rectangle<float> col, float dbfs)
         {
-            const float topo = juce::jmin (vu, ate);
-            if (topo <= de) return;
-            const float y1 = theme::vuToY (de, corpo);
-            const float y2 = theme::vuToY (topo, corpo);
-            g.setColour (c);
-            g.fillRect (corpo.getX(), y2, corpo.getWidth(), y1 - y2);
+            const float vu = theme::dbfsToVu (dbfs);
+            auto faixa = [&] (float de, float ate, juce::Colour c)
+            {
+                const float topo = juce::jmin (vu, ate);
+                if (topo <= de) return;
+                const float y1 = theme::vuToY (de, corpo);
+                const float y2 = theme::vuToY (topo, corpo);
+                g.setColour (c);
+                g.fillRect (col.getX(), y2, col.getWidth(), y1 - y2);
+            };
+            faixa (theme::kMeterBotVu, 0.0f,  theme::meterVerde);
+            faixa (0.0f, 10.0f,               theme::meterAmbar);
+            faixa (10.0f, theme::kMeterTopVu, theme::meterVermelho);
         };
-        pinta (theme::kMeterBotVu, 0.0f,  theme::meterVerde);
-        pinta (0.0f, 10.0f,               theme::meterAmbar);
-        pinta (10.0f, theme::kMeterTopVu, theme::meterVermelho);
+        pintaColuna (colL, dbfsL);
+        pintaColuna (colR, dbfsR);
 
         // serigrafia de segmentos, como painel de LED
         g.setColour (juce::Colour (0xff0a1014));
@@ -493,6 +706,14 @@ private:
             g.setColour (theme::wide);
             const float y = theme::vuToY (theme::dbfsToVu (ch.params.autoMix.targetDb.load()), corpo);
             g.fillRect (r.getX() - 1.0f, y - 1.0f, r.getWidth() + 2.0f, 2.0f);
+        }
+        if (marcaLimiarDb < 0.5f)
+        {
+            // tracejado, para nao se confundir com o alvo, que e linha cheia
+            g.setColour (theme::wide.withAlpha (0.75f));
+            const float y = theme::vuToY (theme::dbfsToVu (marcaLimiarDb), corpo);
+            for (float x = r.getX(); x < r.getRight(); x += 4.0f)
+                g.fillRect (x, y - 1.0f, 2.0f, 2.0f);
         }
 
         g.setColour (juce::Colours::black.withAlpha (0.7f));
@@ -537,7 +758,7 @@ private:
     SurfaceButton soft, autoBtn, preview, recBtn, bigOn, bigOff;
     std::unique_ptr<SurfaceButton> bus[4];
     FaderComponent fader;
-    juce::Rectangle<int> oledArea, meterInArea, meterOutArea, dbReadout, trigRow;
+    juce::Rectangle<int> oledArea, meterInArea, meterOutArea, escalaArea, dbReadout, trigRow;
     mesa::TriggerState trigState = mesa::TriggerState::Idle;
     bool onAir = false;
     float lastFaderDb = -1000.0f;

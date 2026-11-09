@@ -163,7 +163,7 @@ public:
         {
             const auto& ch = mix.channel (i);
             const int tap = ch.params.trigger.source.load (std::memory_order_relaxed);
-            levels[size_t (i)] = ch.tapDb (TapPoint (tap));
+            levels[size_t (i)] = ch.nivelParaGatilho (TapPoint (tap));
         }
 
         bool anyActive = false;
@@ -369,7 +369,7 @@ public:
         Command c;
         c.type = Command::Type::Cut;
         c.camera = cam; c.channel = channel; c.manual = true;
-        c.levelDb = mix.channel (channel).tapDb (TapPoint::Input);
+        c.levelDb = mix.channel (channel).nivelParaGatilho (TapPoint::Input);
         c.simulated = mix.automation.testMode.load (std::memory_order_relaxed);
         c.timeMs = timeMs;
         mix.channel (channel).params.trigger.command.copyTo (c.text, CommandText::kMaxLen);

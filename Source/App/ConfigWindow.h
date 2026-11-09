@@ -160,6 +160,8 @@ public:
 
 
 
+        ouveAssimQueAbre();     // a lista de fontes ja nasce se completando
+
         buildAllTabs();
         mostraPagina (0);
 
@@ -287,7 +289,28 @@ private:
             const bool isSec = ! a.stream.empty() && a.stream[0] == '\x01';
             if (! isSec)
             {
-                aoMudarPar (a.index);        // caminho direto da mestra
+                // PLACA MESTRA: alem de escrever o roteamento, registra a
+                // saida no catalogo.
+                //
+                // Sem isto a escolha sumia ao reabrir. A lista de outputs
+                // passou a ser a unica verdade sobre o que sai pela mestra, e
+                // ela reescreve o roteamento inteiro: um destino de
+                // monitoracao que existia so no roteamento era apagado na
+                // primeira aplicacao. Duas telas mexendo no mesmo campo por
+                // caminhos diferentes - quem perde e sempre a que nao passa
+                // pelo catalogo.
+                aoMudarPar (a.index);
+
+                if (a.index >= 0)
+                {
+                    mesa::OutputDef o;
+                    o.name      = "MON " + std::to_string (bus);
+                    o.kind      = int (mesa::InputKind::Device);
+                    o.pair      = a.index;
+                    o.busSource = bus;
+                    // deviceName vazio = placa mestra
+                    v.push_back (o);
+                }
                 return;
             }
 
@@ -438,7 +461,7 @@ private:
         addSecao ("IO Manager");
         addTab ("Inputs",        buildCatalog());
         addTab ("Outputs",       buildOutputsTab());
-        addTab ("Paginas",       buildPages());
+        addTab ("Snapshots",     buildPages());
 
         addSecao ("Operacao");
         addTab ("Monitoracao",   buildMonitor());
@@ -458,7 +481,7 @@ private:
     /** Transporte. Livewire e Dante NAO sao caminhos distintos para nos: os dois
         aparecem como dispositivo ASIO ou WDM criado pelo driver deles. Ficam aqui
         para o operador se orientar; o filtro e pelo nome do dispositivo. */
-    enum class Transport { Asio = 0, Windows, Livewire, Dante, Ndi };
+    enum class Transport { Asio = 0, Windows, Livewire, Dante, Ndi, Oscilador };
 
     /** Id da opcao "sem entrada". Alto de proposito: os ids normais sao a
         posicao na lista, e o seguinte ja e usado pela opcao "(offline)". */
@@ -595,7 +618,7 @@ private:
 
         if (t == Transport::Ndi)
         {
-            v.push_back ({ "emissor NDI desta mesa (ainda nao transmite)",
+            v.push_back ({ "emissor NDI com o nome desta saida",
                            int (mesa::InputKind::Network), 0, "MESA" });
             return v;
         }
@@ -842,6 +865,7 @@ private:
             varrer->onClick = [this]
             {
                 if (varredura.emAndamento()) { varredura.cancela(); stopTimer(); rebuildTabs(); return; }
+                ouveAnuncios();        // as duas descobertas ao mesmo tempo
                 procuraLivewire();     // um caminho so: o mesmo da varredura automatica
                 rebuildTabs();
             };
@@ -858,12 +882,19 @@ private:
                            makeReadOnly ((a.ip + "   " + juce::String (int (a.fontes.size()))
                                           + " fontes").toStdString()));
 
-            p->addNote ("Procura quem responde ao LWRP na sub-rede desta placa. Nao "
-                        "depende de IP cadastrado nem do multicast de anuncios — se o "
-                        "switch bloquear multicast, isto continua funcionando.");
+            p->addNote ("Procura de dois jeitos ao mesmo tempo. Pergunta por LWRP na porta "
+                        "93 de cada endereco da sub-rede, que acha quem responde ali mesmo "
+                        "com o multicast bloqueado no switch. E escuta os ANUNCIOS, que e "
+                        "de onde a lista do QOR se enche - e a unica forma de ver "
+                        "equipamento que anuncia mas nao serve LWRP, como a propria mesa.");
 
             auto* scan = new juce::TextButton ("CONSULTAR SO ESTE ENDERECO");
-            scan->onClick = [this] { scanLivewire(); };
+            scan->onClick = [this]
+            {
+                ouveAnuncios();
+                scanLivewire();
+                startTimer (1000);     // espera os anuncios chegarem
+            };
             p->addRow ("", scan, 30);
 
             // Escuta dos anuncios: e assim que a lista do QOR se enche com
@@ -881,12 +912,37 @@ private:
             };
             p->addRow ("", ouvir, 30);
 
-            if (navegador != nullptr && navegador->ativo())
+            // O QUE O OUVINTE ESTA VENDO, em numeros.
+            //
+            // Sem isto, "a lista nao completou" tinha quatro causas possiveis e
+            // nenhuma forma de distinguir: o ouvinte nao subiu, nao chega
+            // pacote, chega e nao decodifica, ou decodifica e nao entra na
+            // lista. Cada linha abaixo elimina uma.
+            if (navegador == nullptr || ! navegador->ativo())
+            {
+                p->addRow ("Anuncios", makeReadOnly ("ouvinte PARADO - a lista tem so o "
+                                                     "que o LWRP respondeu"));
+            }
+            else
             {
                 juce::String est;
                 est << navegador->pacotes() << " anuncios recebidos";
                 if (navegador->erro().isNotEmpty()) est << "  |  " << navegador->erro();
                 p->addRow ("Anuncios", makeReadOnly (est.toStdString()));
+
+                const auto ouvidas = navegador->fontes();
+                p->addRow ("Fontes pelo anuncio",
+                           makeReadOnly (std::to_string (ouvidas.size()) + " canais"));
+
+                juce::String quais;
+                int k = 0;
+                for (const auto& f : ouvidas)
+                {
+                    if (k++ >= 12) { quais << "..."; break; }
+                    quais << f.canal << " " << f.nome << "   ";
+                }
+                if (quais.isNotEmpty())
+                    p->addRow ("", makeReadOnly (quais.toStdString()));
 
                 const auto achadas = navegador->fontes();
                 if (achadas.empty())
@@ -936,7 +992,8 @@ private:
         // Cabecalho da tabela, como no Source Profiles do QOR.
         {
             auto* cab = new LinhaTabela();
-            cab->defineColunas ({ "NOME", "USO", "FONTE" }, { 0.30f, 0.30f, 0.40f }, true);
+            cab->defineColunas ({ "NOME", "USO", "DE ONDE VEM O AUDIO" },
+                                { 0.24f, 0.20f, 0.56f }, true);
             p->addWide (cab, 22);
         }
 
@@ -944,20 +1001,54 @@ private:
         {
             const auto& src = settings.catalog.sources[i];
 
+            // A coluna tem de dizer DE ONDE vem o audio, com o NOME na frente.
+            //
+            // Primeiro so trazia "Livewire 3100"; depois tentei por o endereco
+            // multicast junto e ficou pior - numero de rede nao se le de
+            // relance. O que identifica a fonte para quem opera e o nome que o
+            // no publica, o mesmo que aparece na superficie da Axia. O
+            // endereco continua na pagina do input, para quando o assunto for
+            // rede.
+            static const char* lados[] = { "L", "R", "mono L+R", "estereo" };
+
             juce::String fonte;
-            if (src.livewireChannel > 0)      fonte = "Livewire " + juce::String (src.livewireChannel);
-            else if (! src.streamName.empty()) fonte = "NDI " + juce::String (src.streamName);
-            else if (! src.deviceName.empty()) fonte = juce::String (src.deviceName)
-                                                     + " entrada " + juce::String (src.deviceChannel + 1);
-            else if (src.index >= 0)           fonte = "entrada " + juce::String (src.index + 1);
-            else                               fonte = "sem fonte";
+            if (src.livewireChannel > 0)
+            {
+                fonte = src.livewireNome.empty()
+                            ? "(nome ainda nao lido)"
+                            : juce::String (src.livewireNome);
+                fonte += "   canal " + juce::String (src.livewireChannel)
+                       + "   " + lados[juce::jlimit (0, 3, src.livewireSide)];
+            }
+            else if (! src.streamName.empty())
+            {
+                fonte = "NDI " + juce::String (src.streamName);
+            }
+            else if (! src.deviceName.empty())
+            {
+                fonte = juce::String (src.deviceName)
+                      + " entrada " + juce::String (src.deviceChannel + 1);
+                if (! src.deviceType.empty())
+                    fonte += "  (" + juce::String (src.deviceType) + ")";
+            }
+            else if (src.index >= 0)
+            {
+                fonte = juce::String (settings.device.deviceName.empty()
+                                          ? std::string ("placa principal")
+                                          : settings.device.deviceName)
+                      + " entrada " + juce::String (src.index + 1);
+            }
+            else
+            {
+                fonte = "sem fonte";
+            }
 
             auto* linha = new LinhaTabela();
             linha->par = (i % 2) == 0;
             linha->defineColunas ({ juce::String (src.name),
-                                    usos[juce::jlimit (0, 9, src.type)],
+                                    mesa::nomeDoUso (src.type),
                                     fonte },
-                                  { 0.30f, 0.30f, 0.40f });
+                                  { 0.24f, 0.20f, 0.56f });
             linha->aoClicar = [this, i] { editandoInput = int (i); rebuildTabs(); };
             p->addWide (linha, 26);
         }
@@ -1063,19 +1154,48 @@ private:
             tBox->addItem ("ASIO", 1);     tBox->addItem ("Windows", 2);
             tBox->addItem ("Livewire", 3); tBox->addItem ("Dante", 4);
             tBox->addItem ("NDI", 5);
+            tBox->addItem ("Oscilador (gerador de teste)", 6);
             tBox->setSelectedId (int (t) + 1, juce::dontSendNotification);
             tBox->onChange = [this, tBox, si] { inputT[si] = tBox->getSelectedId() - 1; rebuildTabs(); };
             p->addRow ("Tipo", tBox);
 
             // Livewire nativo: nao ha dispositivo para listar — o canal vira
             // endereco por conta, e o operador digita o numero que ve no QOR.
-            if (t == Transport::Livewire)
+            if (t == Transport::Oscilador)
+            {
+                // Fonte sem dispositivo: o sinal vem do gerador da mesa.
+                src.kind = int (mesa::InputKind::Gerador);
+                src.index = -1;
+                src.deviceName.clear();
+                src.deviceType.clear();
+                src.streamName.clear();
+                src.livewireChannel = 0;
+
+                p->addRow ("Fonte", makeReadOnly ("gerador de teste da mesa"));
+                p->addNote ("Poe o sinal do gerador DENTRO de um fader. Ele passa por trim, "
+                            "DSP, fader, pan e barramento como qualquer fonte - e e assim que "
+                            "se acerta o fader contra o medidor sem depender de nada externo: "
+                            "com 1 kHz em -18 e o fader em 0, a barra tem de parar no 0 da "
+                            "regua. O tipo de sinal e o nivel se escolhem em Outputs, no "
+                            "Gerador de teste, e ele precisa estar LIGADO.");
+            }
+            else if (t == Transport::Livewire)
             {
                 // lista vinda do no, como na superficie da Axia
+                // Junta NA HORA DE MOSTRAR.
+                //
+                // Antes a juncao so acontecia dentro do relogio da varredura.
+                // Quem ligava o ouvinte DEPOIS de a varredura acabar - que e o
+                // natural, ja que sao dois botoes - via o ouvinte reconhecer
+                // sete canais e a lista continuar curta, porque ninguem mais
+                // juntava. Aqui nao ha esse tempo: a lista se monta com o que
+                // existe no instante em que e aberta.
+                const auto fontesAgora = juntaComOsAnuncios (livewireSources);
+
                 auto* lwList = new juce::ComboBox();
                 lwList->addItem ("(nenhuma)", 1);
                 int sel = 1, id = 2;
-                for (const auto& lw : livewireSources)
+                for (const auto& lw : fontesAgora)
                 {
                     lwList->addItem (juce::String (lw.livewireChannel) + "  " + lw.name, id);
                     if (lw.livewireChannel == src.livewireChannel) sel = id;
@@ -1094,7 +1214,7 @@ private:
                 }
                 lwList->setSelectedId (sel, juce::dontSendNotification);
 
-                auto listCopy = livewireSources;
+                auto listCopy = fontesAgora;
                 lwList->onChange = [lwList, &src, listCopy]
                 {
                     const int i = lwList->getSelectedId() - 2;
@@ -1141,14 +1261,28 @@ private:
                 auto* sideBox = new juce::ComboBox();
                 sideBox->addItem ("Esquerdo", 1);
                 sideBox->addItem ("Direito", 2);
-                sideBox->addItem ("Estereo (soma L+R)", 3);
-                sideBox->setSelectedId (src.livewireSide + 1, juce::dontSendNotification);
-                sideBox->onChange = [sideBox, &src] { src.livewireSide = sideBox->getSelectedId() - 1; };
+                sideBox->addItem ("Mono (soma L+R)", 3);
+                sideBox->addItem ("Estereo (L e R de verdade)", 4);
+                sideBox->setSelectedId (juce::jlimit (0, 3, src.livewireSide) + 1,
+                                        juce::dontSendNotification);
+                sideBox->onChange = [this, sideBox, &src]
+                { src.livewireSide = sideBox->getSelectedId() - 1; rebuildTabs(); };
                 p->addRow ("Canal do estereo", sideBox);
-                p->addNote ("O canal desta mesa e MONO com pan, como em console de radio: "
-                            "cada fader carrega um sinal. Para microfone, telefone e codec "
-                            "isso e o certo. Para playout com musica, use a soma — pegar so "
-                            "um lado perderia metade do conteudo.");
+                p->addNote ("Um stream Livewire sempre traz dois lados. ESQUERDO ou DIREITO "
+                            "pega um so - use quando o equipamento manda dois sinais "
+                            "independentes, como certos hibridos e codecs. MONO soma os dois "
+                            "num sinal: e o certo para microfone, telefone e codec. ESTEREO "
+                            "faz o fader carregar as duas pontas de verdade, cada uma no seu "
+                            "lado do barramento, com o pan virando balanco - e o que playout "
+                            "com musica pede.");
+
+                if (src.livewireSide == 3)
+                    p->addNote ("ATENCAO: em estereo o rack de DSP deste canal NAO atua - nem "
+                                "EQ, nem compressor, nem gate. O rack guarda estado por lado e "
+                                "ainda nao sabe tratar dois. Playout costuma dispensar DSP, mas "
+                                "se este canal precisar de EQ, use MONO por enquanto. O fader, "
+                                "o trim, o ON/OFF, o CUE e o mix-minus funcionam normalmente. "
+                                "Cada fonte estereo ocupa DOIS lugares de rede em vez de um.");
 
                 p->addRow ("Endereco", makeReadOnly (src.livewireChannel > 0
                     ? (LivewireReceiver::addressForChannel (src.livewireChannel) + ":5004").toStdString()
@@ -1162,6 +1296,49 @@ private:
             else
             {
             const auto avail = availableSources (t);
+            // TIPO DE CANAL: mono ou estereo, com as duas entradas escolhidas
+            // SEPARADAMENTE.
+            //
+            // Antes era "esta entrada e a seguinte", e isso obrigava o par a
+            // cair em conectores vizinhos. Placa nao garante isso, e quem
+            // remaneja cabo no rack nao deveria ter de respeitar uma regra
+            // nossa de numeracao. Agora sao duas escolhas: 3 no L, 4 no R - ou
+            // qualquer outra combinacao.
+            // SO A PLACA MESTRA tem par de entradas para casar.
+            //
+            // A condicao olhava so o que estava GRAVADO na fonte, e input novo
+            // vem com tudo vazio - entao o seletor de estereo aparecia em NDI,
+            // em Livewire e em placa secundaria, onde ele nao faz sentido
+            // nenhum: nesses o estereo vem dentro do proprio stream. Agora
+            // quem decide e o TIPO escolhido na tela, que e o que o operador
+            // acabou de dizer.
+            const bool parDaPlaca = (t == Transport::Asio || t == Transport::Windows)
+                                 && src.deviceName.empty();
+
+            if (parDaPlaca)
+            {
+                auto* tipoCanal = new juce::ComboBox();
+                tipoCanal->addItem ("Mono - uma entrada", 1);
+                tipoCanal->addItem ("Estereo - duas entradas", 2);
+                tipoCanal->setSelectedId (src.deviceEstereo ? 2 : 1, juce::dontSendNotification);
+                tipoCanal->onChange = [this, tipoCanal, &src]
+                {
+                    src.deviceEstereo = (tipoCanal->getSelectedId() == 2);
+                    // sugere a entrada seguinte, que e o arranjo mais comum -
+                    // mas fica so como ponto de partida, nao como regra
+                    if (src.deviceEstereo && src.deviceIndexR < 0 && src.index >= 0)
+                        src.deviceIndexR = src.index + 1;
+                    rebuildTabs();
+                };
+                p->addRow ("Tipo de canal", tipoCanal);
+
+                if (! src.deviceEstereo)
+                    p->addNote ("Mono e o certo para microfone: uma entrada so, e o pan coloca "
+                                "o canal onde se quiser na imagem. Estereo e para linha - "
+                                "toca-discos, playout, retorno de PC - que ocupa dois "
+                                "conectores da placa.");
+            }
+
             auto* srcBox = new juce::ComboBox();
             int sel = 1;
             for (size_t k = 0; k < avail.size(); ++k)
@@ -1194,6 +1371,7 @@ private:
             srcBox->setSelectedId (sel, juce::dontSendNotification);
             if (avail.size() <= 1)
                 srcBox->setTextWhenNoChoicesAvailable ("nada disponivel neste tipo");
+
             auto availCopy = avail;
             srcBox->onChange = [srcBox, &src, availCopy]
             {
@@ -1207,6 +1385,7 @@ private:
                 {
                     src.kind  = int (mesa::InputKind::Device);
                     src.index = -1;
+                    src.deviceEstereo = false;
                     src.deviceName.clear();
                     src.streamName.clear();
                     src.livewireChannel = 0;
@@ -1246,10 +1425,67 @@ private:
                     src.index = a.index;
                 }
             };
-            p->addRow ("Fonte", srcBox);
+            const bool estereoDaPlaca = parDaPlaca && src.deviceEstereo;
+            p->addRow (estereoDaPlaca ? "Entrada L" : "Fonte", srcBox);
+
+            if (estereoDaPlaca)
+            {
+                auto* dirBox = new juce::ComboBox();
+                int selD = 0;
+                for (size_t k = 1; k < avail.size(); ++k)
+                {
+                    const auto& a = avail[k];
+                    if (! a.stream.empty()) continue;           // so a placa mestra
+                    dirBox->addItem (a.label, a.index + 1);
+                    if (a.index == src.deviceIndexR) selD = a.index + 1;
+                }
+                if (selD == 0 && dirBox->getNumItems() > 0) selD = dirBox->getItemId (0);
+
+                dirBox->setSelectedId (selD, juce::dontSendNotification);
+                dirBox->onChange = [dirBox, &src]
+                { src.deviceIndexR = dirBox->getSelectedId() - 1; };
+                p->addRow ("Entrada R", dirBox);
+
+                p->addNote ("As duas entradas viram UM canal: o pan vira balanco, e o ON, o "
+                            "fader e o trim valem para as duas de uma vez. A entrada do R "
+                            "fica OCUPADA - nao a use noutro fader, ou o mesmo audio entra "
+                            "duas vezes na mistura.");
+            }
+            if (t == Transport::Ndi)
+            {
+                // O ESTADO DO NDI AQUI, e nao "confira a aba Rede".
+                //
+                // Lista vazia tem tres causas bem diferentes - o runtime nao
+                // esta instalado, a busca acabou de comecar, ou ninguem esta
+                // transmitindo - e cada uma pede uma acao diferente. Mandar o
+                // operador procurar o estado noutra aba e fazer com que ele
+                // desista.
+                auto& ndi = NdiEngine::instance();
+                p->addRow ("Estado do NDI", makeReadOnly (ndi.status().toStdString()));
+
+                const int quantas = int (ndi.sources().size());
+                p->addRow ("Emissores vistos",
+                           makeReadOnly (std::to_string (quantas) + " na rede"));
+
+                auto* procurar = new juce::TextButton ("PROCURAR EMISSORES DE NOVO");
+                procurar->onClick = [this] { NdiEngine::instance().startDiscovery(); rebuildTabs(); };
+                p->addRow ("", procurar, 28);
+
+                if (! ndi.available())
+                    p->addNote ("O runtime do NDI nao esta nesta maquina. Sem ele a mesa nao "
+                                "ve nem transmite NDI - instale o NDI Runtime da NewTek e "
+                                "reabra a mesa.");
+                else if (quantas == 0)
+                    p->addNote ("A busca leva alguns segundos e depende de multicast na rede. "
+                                "Se nao aparecer nada: confira se o emissor esta na MESMA "
+                                "sub-rede, se o firewall do Windows libera o NDI, e se a "
+                                "placa de rede certa esta ativa. Espere uns 10 segundos e "
+                                "aperte procurar de novo.");
+            }
+
             if (avail.size() <= 1)
                 p->addNote (t == Transport::Ndi
-                    ? "Nenhum emissor NDI visto na rede agora. Confira a aba Rede."
+                    ? "Nenhum emissor NDI escolhivel ainda - veja o estado acima."
                     : t == Transport::Asio
                       ? "Nenhuma entrada ASIO. A placa mestra tem entradas? Para cabo "
                         "virtual e placas do Windows, troque o Tipo para Windows."
@@ -1257,20 +1493,73 @@ private:
 
             }
 
+            // DUPLICADOS FORAM EMBORA DESTA PAGINA.
+            //
+            // Uso, camera e trigger tambem existiam no SOFT do canal, e dois
+            // campos editando o mesmo valor por caminhos diferentes ja tinha
+            // dado problema: o trim daqui nao funcionava porque o valor do
+            // canal voltava por cima um segundo depois. Em vez de esperar o
+            // mesmo defeito aparecer nos outros tres, so um lugar edita.
+            //
+            // O criterio: esta pagina define o que a fonte E - nome, tipo,
+            // endereco, GPIO. O SOFT ajusta como ela SOA agora, com o audio
+            // tocando e o medidor na frente. O que sobra aqui e leitura, para
+            // conferir de relance.
             auto* useBox = new juce::ComboBox();
-            for (int k = 0; k < 10; ++k) useBox->addItem (uses[k], k + 1);
-            useBox->setSelectedId (src.type + 1, juce::dontSendNotification);
-            useBox->onChange = [useBox, &src] { src.type = useBox->getSelectedId() - 1; };
+            useBox->addItem (mesa::nomeDoUso (int (mesa::Uso::MicControle)), 1);
+            useBox->addItem (mesa::nomeDoUso (int (mesa::Uso::MicEstudio)), 2);
+            useBox->addItem (mesa::nomeDoUso (int (mesa::Uso::TelefoneOuExterna)), 3);
+            useBox->addItem (mesa::nomeDoUso (int (mesa::Uso::Linha)), 4);
+
+            const int canon = mesa::usoCanonico (src.type);
+            useBox->setSelectedId (canon == int (mesa::Uso::MicControle)       ? 1
+                                 : canon == int (mesa::Uso::MicEstudio)        ? 2
+                                 : canon == int (mesa::Uso::TelefoneOuExterna) ? 3 : 4,
+                                   juce::dontSendNotification);
+            useBox->onChange = [useBox, &src]
+            {
+                switch (useBox->getSelectedId())
+                {
+                    case 1:  src.type = int (mesa::Uso::MicControle); break;
+                    case 2:  src.type = int (mesa::Uso::MicEstudio); break;
+                    case 3:  src.type = int (mesa::Uso::TelefoneOuExterna); break;
+                    default: src.type = int (mesa::Uso::Linha); break;
+                }
+            };
             p->addRow ("Uso", useBox);
+            p->addNote ("Nao e o tipo do microfone - e o que a mesa FAZ quando este fader "
+                        "abre. MIC NO CONTROLE: corta o monitor do controle e o preview, "
+                        "porque o microfone esta na mesma sala dessas caixas e realimentaria. "
+                        "MIC NO ESTUDIO: corta o monitor do estudio, a outra sala - sao caixas "
+                        "diferentes, por isso os dois nao se juntam. TELEFONE OU EXTERNA: nao "
+                        "corta caixa nenhuma e ganha mix-minus, um retorno com a mesa menos a "
+                        "propria voz, sem o qual quem esta na linha se escuta com atraso. "
+                        "LINHA: nao faz nada de especial. Da para trocar a qualquer momento.");
 
-            dbSlider (*p, "Trim", src.trimDb, -25.0f, 25.0f, [&src] (float v) { src.trimDb = v; });
+            // O TRIM SE AJUSTA NA TIRA, NAO AQUI.
+            //
+            // Havia um campo editavel neste lugar e ele NAO FUNCIONAVA: o valor
+            // do canal volta para o catalogo a cada sincronizacao, entao o que
+            // se digitava aqui era sobrescrito um segundo depois. Dois campos
+            // editando a mesma coisa em direcoes opostas.
+            //
+            // Ficou o do SOFT do canal, que e onde se ajusta trim de verdade -
+            // olhando o medidor IN enquanto a fonte toca. Aqui fica so a
+            // leitura, para conferir de relance como cada entrada esta.
+            p->addRow ("Input trim gain",
+                       makeReadOnly (juce::String (src.trimDb, 1).toStdString() + " dB"));
+            p->addNote ("Ganho da ENTRADA, antes do DSP, do fader e do ON/OFF - o mesmo campo "
+                        "da pagina de Source Profile do QOR. Ajuste no SOFT do canal que "
+                        "carrega esta fonte, olhando o medidor IN: e assim que se acha o "
+                        "ponto. O valor pertence a ENTRADA e acompanha ela para qualquer "
+                        "fader.");
 
-            auto* camBox = new juce::ComboBox();
-            camBox->addItem ("sem camera", 1);
-            for (int k = 1; k <= 8; ++k) camBox->addItem ("CAM " + juce::String (k), k + 1);
-            camBox->setSelectedId (src.camera + 1, juce::dontSendNotification);
-            camBox->onChange = [camBox, &src] { src.camera = camBox->getSelectedId() - 1; };
-            p->addRow ("Camera", camBox);
+            p->addRow ("Camera", makeReadOnly (src.camera > 0
+                                                   ? "CAM " + std::to_string (src.camera)
+                                                   : std::string ("sem camera")));
+            p->addNote ("Uso, camera e trigger se ajustam no SOFT do canal que carrega esta "
+                        "fonte - e la que da para ouvir o resultado. Aqui ficam so os valores, "
+                        "para conferir.");
 
             toggle (*p, "Transcrever a fala deste input", src.transcrever,
                     [&src] (bool v) { src.transcrever = v; });
@@ -1324,10 +1613,12 @@ private:
                         "comando de estudio. Zero desliga.");
 
             p->addTitle ("Trigger");
-            dbSlider (*p, "Threshold", src.thresholdDb, -70.0f, -10.0f,
-                      [&src] (float v) { src.thresholdDb = v; });
-            toggle (*p, "Trigger ligado", src.triggerEnabled,
-                    [&src] (bool v) { src.triggerEnabled = v; });
+            p->addRow ("Estado", makeReadOnly (src.triggerEnabled ? "ligado" : "desligado"));
+            p->addRow ("Threshold",
+                       makeReadOnly (juce::String (src.thresholdDb, 1).toStdString() + " dBFS"));
+            p->addNote ("O trigger inteiro - ponto de deteccao, permanencia, histerese, "
+                        "comando e o teste - esta na aba Trigger do SOFT do canal. Threshold se "
+                        "calibra ouvindo, e o calibrador automatico tambem esta la.");
 
             auto* del = new juce::TextButton ("REMOVER INPUT");
             const std::string nameCopy = src.name;
@@ -1348,8 +1639,135 @@ private:
         auto* p = new CfgPage();
         p->addTitle ("Outputs");
         p->addNote ("Saidas da placa mestra saem direto no callback. Saidas de placa "
-                    "secundaria passam por fila, com conversao de taxa — mesma mecanica "
-                    "dos inputs. Envio por NDI ainda nao transmite.");
+                    "secundaria, Livewire e NDI passam por fila, com correcao de relogio — "
+                    "mesma mecanica dos inputs.");
+        p->addNote ("SAIDA NDI aparece na rede com o NOME da saida: no vMix ela surge como "
+                    "\"MAQUINA (NOME DA SAIDA)\". Duas saidas NDI viram duas fontes "
+                    "separadas, cada uma levando o que foi escolhido em \"O que sai\".");
+
+        // ---------------------------------------------- gerador de teste
+        p->addTitle ("Gerador de teste");
+        p->addNote ("Manda um sinal CONHECIDO para uma saida, para calibrar a cadeia sem "
+                    "depender de fonte externa: confere no medidor do outro lado se o que "
+                    "sai daqui chega la no mesmo nivel. Ele TOMA o destino enquanto estiver "
+                    "ligado - nao soma ao programa. Escolha uma saida que nao esteja no ar.");
+
+        auto* tipoBox = new juce::ComboBox();
+        tipoBox->addItem ("Tom de 1 kHz - para nivel", 1);
+        tipoBox->addItem ("Ruido rosa - para resposta e sala", 2);
+        tipoBox->addItem ("Ruido branco - para cadeia e ruido de fundo", 3);
+        tipoBox->setSelectedId (juce::jlimit (0, 2, settings.testeTipo) + 1,
+                                juce::dontSendNotification);
+        tipoBox->onChange = [this, tipoBox]
+        {
+            settings.testeTipo = tipoBox->getSelectedId() - 1;
+            mix.teste.tipo.store (settings.testeTipo);
+        };
+        p->addRow ("Sinal", tipoBox);
+        p->addNote ("O tom de 1 kHz e a referencia de nivel de toda cadeia de radio. O ruido "
+                    "ROSA tem a mesma energia por oitava, que e como o ouvido divide o "
+                    "espectro - por isso soa plano e serve para julgar sala. O BRANCO tem a "
+                    "mesma energia por hertz e soa agudo demais para isso.");
+
+        // Duas naturezas de destino na mesma lista: uma SAIDA, que afeta so
+        // quem esta ligado nela, e um BARRAMENTO, que afeta o medidor de
+        // programa, o monitor, o CUE e toda saida que leve aquele PGM. O
+        // barramento e o que faz "modular la em cima" - e tambem o que cala o
+        // programa se for o PGM que esta no ar. Por isso vem depois, com
+        // aviso, e nao como primeira opcao.
+        auto* destBox = new juce::ComboBox();
+        destBox->addItem ("(nenhum - desligado)", 1);
+
+        int selD = 1, idD = 2;
+        for (const auto& o : settings.outputs.outputs)
+        {
+            destBox->addItem ("Saida: " + juce::String (o.name), idD);
+            if (settings.testeBus < 0 && o.name == settings.testeDestino) selD = idD;
+            ++idD;
+        }
+
+        const int primeiroBus = idD;
+        for (int b = 0; b < mesa::kNumBuses; ++b)
+        {
+            destBox->addItem ("Barramento PGM " + juce::String (b + 1) + " - aparece no medidor",
+                              idD);
+            if (settings.testeBus == b) selD = idD;
+            ++idD;
+        }
+
+        destBox->setSelectedId (selD, juce::dontSendNotification);
+        destBox->onChange = [this, destBox, primeiroBus]
+        {
+            const int id = destBox->getSelectedId();
+            if (id >= primeiroBus)
+            {
+                settings.testeBus = id - primeiroBus;
+                settings.testeDestino.clear();
+            }
+            else
+            {
+                const int k = id - 2;
+                settings.testeBus = -1;
+                settings.testeDestino = (k >= 0 && k < int (settings.outputs.outputs.size()))
+                                            ? settings.outputs.outputs[size_t (k)].name
+                                            : std::string();
+            }
+            mix.testeBus.store (settings.testeBus);
+            if (settings.testeDestino.empty() && settings.testeBus < 0)
+                mix.teste.ativo.store (false);
+            if (onDestinoDoTeste) onDestinoDoTeste();
+            rebuildTabs();
+        };
+        p->addRow ("Sai por", destBox);
+        p->addNote ("SAIDA: o tom toma aquele destino e mais nada - o resto da mesa segue "
+                    "normal. BARRAMENTO: o tom toma o PGM inteiro, entao aparece no medidor "
+                    "de programa, no monitor, no CUE e em toda saida que leve aquele PGM. E o "
+                    "que serve para calibrar olhando a barra de cima - e o que CALA O "
+                    "PROGRAMA se for o PGM que esta no ar.");
+
+        dbSlider (*p, "Nivel (dBFS)", settings.testeNivelDb, -40.0f, 0.0f,
+                  [this] (float v)
+                  { settings.testeNivelDb = v; mix.teste.nivelDb.store (v); });
+        p->addNote ("Para o TOM o numero e o PICO da senoide, como manda a EBU R68: em -18 a "
+                    "barra para exatamente no 0 da regua, e e essa leitura que se combina com "
+                    "o outro lado da linha. Para os RUIDOS o numero e RMS, porque ruido nao "
+                    "tem pico util - os picos deles vao ficar acima do numero pedido, e isso "
+                    "e normal.");
+
+        auto* liga = new juce::TextButton (mix.teste.ativo.load()
+                                               ? "DESLIGAR O GERADOR" : "LIGAR O GERADOR");
+        liga->onClick = [this]
+        {
+            // Sem destino tambem vale: um fader com o tipo "Oscilador" ja e
+            // destino. Exigir saida ou barramento impediria justamente o uso
+            // mais seguro - calibrar o fader sem tocar em nada que va ao ar.
+            mix.teste.ativo.store (! mix.teste.ativo.load());
+            if (onDestinoDoTeste) onDestinoDoTeste();
+            rebuildTabs();
+        };
+        p->addRow ("", liga, 30);
+
+        if (settings.testeDestino.empty() && settings.testeBus < 0)
+            p->addNote (mix.teste.ativo.load()
+                            ? "LIGADO sem destino fixo: o sinal so aparece nos faders cujo "
+                              "input for do tipo Oscilador. E a forma mais segura de usar - "
+                              "nada muda no que ja esta no ar."
+                            : "Sem destino, ele alimenta so os faders com input do tipo "
+                              "Oscilador. Escolha um destino acima para mandar tambem a uma "
+                              "saida ou a um barramento.");
+        else if (mix.teste.ativo.load() && settings.testeBus >= 0)
+            p->addNote ("LIGADO NO PGM " + std::to_string (settings.testeBus + 1)
+                        + ": este barramento esta levando o sinal de teste no lugar do "
+                          "programa, em tudo que sai por ele.");
+        else if (mix.teste.ativo.load())
+            p->addNote ("LIGADO: a saida \"" + settings.testeDestino + "\" esta levando o sinal "
+                        "de teste, e nao o que ela normalmente leva.");
+        else
+            p->addNote ("O gerador nasce DESLIGADO a cada abertura da mesa, mesmo que voce "
+                        "esqueca ligado. Tom esquecido no ar e a falha classica de gerador em "
+                        "mesa; religar custa um segundo.");
+
+        p->addTitle ("Saidas");
 
         auto* add = new juce::TextButton ("ADICIONAR OUTPUT");
         add->onClick = [this]
@@ -1390,11 +1808,21 @@ private:
                                                          + "/" + juce::String (o.pair * 2 + 2);
                 else                             destino = "nao roteado";
 
+                // A coluna tem de dizer o que REALMENTE sai. Enquanto mostrava
+                // sempre o barramento, cinco destinos apareciam identicos em
+                // "PGM 1" mesmo quando um era direct out e outro mix-minus - e
+                // a lista existe justamente para comparar de relance.
+                juce::String oQueSai;
+                if (o.mixMinusChannel >= 0)
+                    oQueSai = "Mix-minus canal " + juce::String (o.mixMinusChannel + 1);
+                else if (! o.directSource.empty())
+                    oQueSai = "Direct: " + juce::String (o.directSource);
+                else
+                    oQueSai = busNames[juce::jlimit (0, 7, o.busSource)];
+
                 auto* linha = new LinhaTabela();
                 linha->par = (oi % 2) == 0;
-                linha->defineColunas ({ juce::String (o.name),
-                                        busNames[juce::jlimit (0, 7, o.busSource)],
-                                        destino },
+                linha->defineColunas ({ juce::String (o.name), oQueSai, destino },
                                       { 0.30f, 0.25f, 0.45f });
                 linha->aoClicar = [this, oi] { editandoOutput = int (oi); rebuildTabs(); };
                 p->addWide (linha, 26);
@@ -1432,8 +1860,10 @@ private:
             auto* busBox = new juce::ComboBox();
             for (int k = 0; k < 8; ++k) busBox->addItem (busNames[k], k + 1);
             busBox->addItem ("Direct out (uma entrada)", 9);
-            busBox->setSelectedId (out.directSource.empty()
-                                       ? juce::jlimit (0, 7, out.busSource) + 1 : 9,
+            busBox->addItem ("Mix-minus (de um canal)", 10);
+            busBox->setSelectedId (out.mixMinusChannel >= 0 ? 10
+                                   : ! out.directSource.empty() ? 9
+                                   : juce::jlimit (0, 7, out.busSource) + 1,
                                    juce::dontSendNotification);
             busBox->onChange = [this, busBox, &out]
             {
@@ -1445,15 +1875,40 @@ private:
                     // voltaria sozinha para o barramento
                     if (out.directSource.empty() && ! settings.catalog.sources.empty())
                         out.directSource = settings.catalog.sources.front().name;
+                    out.mixMinusChannel = -1;
+                }
+                else if (id == 10)
+                {
+                    if (out.mixMinusChannel < 0) out.mixMinusChannel = 0;
+                    out.directSource.clear();
                 }
                 else
                 {
                     out.busSource = id - 1;
                     out.directSource.clear();
+                    out.mixMinusChannel = -1;
                 }
                 rebuildTabs();
             };
             p->addRow ("O que sai", busBox);
+
+            if (out.mixMinusChannel >= 0)
+            {
+                const int nCanais = juce::jmax (1, settings.surface.fadersPerLayer
+                                                   * settings.surface.layers);
+                auto* mmBox = new juce::ComboBox();
+                for (int k = 0; k < nCanais; ++k)
+                    mmBox->addItem ("Canal " + juce::String (k + 1), k + 1);
+                mmBox->setSelectedId (juce::jlimit (0, nCanais - 1, out.mixMinusChannel) + 1,
+                                      juce::dontSendNotification);
+                mmBox->onChange = [mmBox, &out] { out.mixMinusChannel = mmBox->getSelectedId() - 1; };
+                p->addRow ("Retorno de qual canal", mmBox);
+                p->addNote ("Manda para este destino o retorno daquele canal: a mesa MENOS a "
+                            "voz dele. A fonte troca sozinha com o ON/OFF do fader - fora do "
+                            "ar ele ouve a comunicacao, no ar ouve o programa. Quais "
+                            "barramentos sao usados se escolhe no SOFT do canal, em Mix-minus. "
+                            "Crie uma saida destas para cada telefone ou externa.");
+            }
 
             if (! out.directSource.empty())
             {
@@ -1598,6 +2053,8 @@ private:
         auto it = inputT.find (i);
         if (it != inputT.end()) return Transport (it->second);
 
+        if (d.kind == int (mesa::InputKind::Gerador)) return Transport::Oscilador;
+        if (d.kind == int (mesa::InputKind::Gerador)) return Transport::Oscilador;
         if (d.livewireChannel > 0)   return Transport::Livewire;
         if (! d.streamName.empty())  return Transport::Ndi;
         if (! d.deviceName.empty())  return transporteDoDispositivo (d.deviceType, d.deviceName);
@@ -1682,59 +2139,211 @@ private:
         return p;
     }
 
-    /** Paginas: mapa de posicao de fader para nome de fonte. */
+    /** Paginas: LISTA primeiro, detalhe depois.
+
+        Cada pagina abria dezesseis combos direto na aba. Com tres paginas a
+        tela virava uma rolagem sem fim e nao dava para ver quantas existiam,
+        nem qual era qual. Mesmo padrao dos Inputs e dos Outputs: a lista diz o
+        que existe, o detalhe mostra uma de cada vez. */
     CfgPage* buildPages()
     {
-        auto* p = new CfgPage();
-        p->addTitle ("Paginas de fader");
-        p->addNote ("Cada pagina diz que fonte fica em cada posicao. Trocar de pagina "
-                    "NAO tira do ar: canal aberto fica pendente ate ser fechado.");
+        if (editandoPagina >= 0 && editandoPagina < int (settings.pages.pages.size()))
+            return buildPageDetail (size_t (editandoPagina));
 
-        auto* add = new juce::TextButton ("ADICIONAR PAGINA");
-        add->onClick = [this]
+        auto* p = new CfgPage();
+        p->addTitle ("Snapshots");
+        p->addNote ("Um SNAPSHOT guarda a mesa e a devolve pelo nome, como em qualquer mesa "
+                    "profissional. Aqui ele carrega duas coisas: o FADER LAYOUT - que fonte "
+                    "fica em cada posicao, atravessando as duas layers - e o estado de cada "
+                    "canal.");
+        p->addNote ("RECALL SAFE automatico: canal no ar nao e tocado pelo recall, nem de "
+                    "fonte nem de fader. Ele fica pendente e so assume quando alguem o "
+                    "fechar. Na superficie, o botao SNAPSHOT abre a lista e voce escolhe "
+                    "direto.");
+
+        auto* capturar = new juce::TextButton ("STORE - guardar a mesa como esta");
+        capturar->onClick = [this]
+        {
+            mesa::FaderPage pg;
+            pg.name = "PAGINA " + std::to_string (settings.pages.pages.size() + 1);
+            pg.slots.resize (size_t (mix.numChannels()));
+            for (int i = 0; i < mix.numChannels(); ++i)
+                pg.slots[size_t (i)] = mix.channel (i).name;
+
+            pg.guardaTudo = true;
+            pg.cena = mesa::captureScene (mix, pg.name);
+            pg.gravadaEm = agoraTexto();
+
+            settings.pages.pages.push_back (pg);
+            editandoPagina = int (settings.pages.pages.size()) - 1;
+            rebuildTabs();
+        };
+        p->addWide (capturar, 32);
+        p->addNote ("Guarda o layout e o estado: fonte de cada fader, posicao dos faders, "
+                    "buses, trim, DSP e mix-minus. Arrume a mesa trabalhando, veja que "
+                    "funciona, e guarde.");
+
+        auto* vazia = new juce::TextButton ("NOVO SNAPSHOT VAZIO");
+        vazia->onClick = [this]
         {
             mesa::FaderPage pg;
             pg.name = "PAGINA " + std::to_string (settings.pages.pages.size() + 1);
             pg.slots.assign (size_t (mix.numChannels()), std::string());
+            pg.gravadaEm = agoraTexto();
             settings.pages.pages.push_back (pg);
+            editandoPagina = int (settings.pages.pages.size()) - 1;
             rebuildTabs();
         };
-        p->addRow ("Nova", add, 30);
+        p->addWide (vazia, 28);
 
-        for (auto& pg : settings.pages.pages)
+        if (settings.pages.pages.empty())
         {
-            p->addTitle (juce::String (pg.name));
+            p->addNote ("Nenhum snapshot guardado ainda.");
+            return p;
+        }
 
-            auto* nameBox = new juce::TextEditor();
-            nameBox->setText (pg.name, juce::dontSendNotification);
-            nameBox->setFont (theme::mono (12.0f));
-            nameBox->onTextChange = [nameBox, &pg] { pg.name = nameBox->getText().toStdString(); };
-            p->addRow ("Nome", nameBox);
+        auto* cab = new LinhaTabela();
+        cab->defineColunas ({ "NOME", "RECALL SCOPE", "STORED" },
+                            { 0.36f, 0.26f, 0.38f }, true);
+        p->addWide (cab, 22);
 
-            pg.slots.resize (size_t (mix.numChannels()));
+        for (size_t i = 0; i < settings.pages.pages.size(); ++i)
+        {
+            const auto& pg = settings.pages.pages[i];
 
-            for (size_t i = 0; i < pg.slots.size(); ++i)
-            {
-                auto* box = new juce::ComboBox();
-                box->addItem ("(vazio)", 1);
-                int sel = 1, id = 2;
-                for (const auto& src : settings.catalog.sources)
-                {
-                    box->addItem (src.name, id);
-                    if (src.name == pg.slots[i]) sel = id;
-                    ++id;
-                }
-                box->setSelectedId (sel, juce::dontSendNotification);
-                auto* slot = &pg.slots[i];
-                box->onChange = [box, slot]
-                {
-                    const auto t = box->getText();
-                    *slot = (t == "(vazio)") ? std::string() : t.toStdString();
-                };
-                p->addRow ("Fader " + juce::String (int (i) + 1), box);
-            }
+            // RECALL SCOPE e o termo de mesa para "o que o recall devolve":
+            // layout + estado, ou so o layout.
+            juce::String guarda = pg.guardaTudo ? "layout + estado" : "so o layout";
+            int ocupados = 0;
+            for (const auto& sl : pg.slots) if (! sl.empty()) ++ocupados;
+            guarda += "  (" + juce::String (ocupados) + " faders)";
+
+            // O ATIVO MARCADO. Mesa profissional sempre diz qual snapshot esta
+            // valendo: sem isso o operador olha a lista e nao sabe de onde
+            // veio o que esta na frente dele.
+            const bool ativo = int (i) == settings.pages.active;
+
+            auto* linha = new LinhaTabela();
+            linha->par = (i % 2) == 0;
+            linha->defineColunas ({ (ativo ? "> " : "  ") + juce::String (pg.name), guarda,
+                                    pg.gravadaEm.empty() ? juce::String ("-")
+                                                         : juce::String (pg.gravadaEm) },
+                                  { 0.36f, 0.26f, 0.38f });
+            linha->aoClicar = [this, i] { editandoPagina = int (i); rebuildTabs(); };
+            p->addWide (linha, 26);
         }
         return p;
+    }
+
+    /** Detalhe de UMA pagina. */
+    CfgPage* buildPageDetail (size_t indice)
+    {
+        auto& pg = settings.pages.pages[indice];
+        auto* p = new CfgPage();
+
+        auto* voltar = new juce::TextButton ("< VOLTAR A LISTA");
+        voltar->onClick = [this] { editandoPagina = -1; rebuildTabs(); };
+        p->addWide (voltar, 30);
+        p->addTitle (juce::String (pg.name));
+
+        auto* nameBox = new juce::TextEditor();
+        nameBox->setText (pg.name, juce::dontSendNotification);
+        nameBox->setFont (theme::mono (12.0f));
+        nameBox->onTextChange = [nameBox, &pg] { pg.name = nameBox->getText().toStdString(); };
+        p->addRow ("Nome", nameBox);
+
+        p->addRow ("Stored", makeReadOnly (pg.gravadaEm.empty() ? std::string ("-")
+                                                                   : pg.gravadaEm));
+        p->addNote ("Quando a MESA foi guardada neste snapshot - muda em STORE, UPDATE e "
+                    "COPY. O botao SALVAR E APLICAR la embaixo grava o arquivo de "
+                    "configuracao e nao mexe nesta data: sao coisas diferentes.");
+
+        auto* tudoBox = new juce::ToggleButton();
+        tudoBox->setToggleState (pg.guardaTudo, juce::dontSendNotification);
+        tudoBox->onClick = [this, indice, tudoBox]
+        { settings.pages.pages[indice].guardaTudo = tudoBox->getToggleState(); rebuildTabs(); };
+        p->addRow ("Recall scope: layout + estado", tudoBox);
+        p->addNote (pg.guardaTudo
+                        ? "O recall devolve fader, bus, trim, DSP e mix-minus de cada canal, "
+                          "alem do layout. Canal no ar fica em recall safe - rearrumar a mesa "
+                          "nunca cala quem esta falando."
+                        : "O recall troca so o FADER LAYOUT; o que estiver ajustado em cada "
+                          "canal fica como esta.");
+
+        auto* capt = new juce::TextButton ("UPDATE - regravar com a mesa de agora");
+        capt->onClick = [this, indice]
+        {
+            auto& alvo = settings.pages.pages[indice];
+            alvo.slots.resize (size_t (mix.numChannels()));
+            for (int i = 0; i < mix.numChannels(); ++i)
+                alvo.slots[size_t (i)] = mix.channel (i).name;
+            alvo.guardaTudo = true;
+            alvo.cena = mesa::captureScene (mix, alvo.name);
+            alvo.gravadaEm = agoraTexto();
+            rebuildTabs();
+        };
+        p->addWide (capt, 28);
+
+        // DUPLICAR: paginas de um mesmo estudio sao quase iguais entre si.
+        // "Jornal" e "Jornal com convidado" mudam dois faders; refazer os
+        // dezesseis do zero so cria oportunidade de errar um.
+        auto* dup = new juce::TextButton ("COPY");
+        dup->onClick = [this, indice]
+        {
+            auto copia = settings.pages.pages[indice];
+            copia.name += " (copia)";
+            copia.gravadaEm = agoraTexto();
+            settings.pages.pages.insert (settings.pages.pages.begin() + long (indice) + 1, copia);
+            editandoPagina = int (indice) + 1;
+            rebuildTabs();
+        };
+        p->addWide (dup, 28);
+
+        auto* del = new juce::TextButton ("DELETE");
+        del->onClick = [this, indice]
+        {
+            settings.pages.pages.erase (settings.pages.pages.begin() + long (indice));
+            if (settings.pages.active >= int (settings.pages.pages.size()))
+                settings.pages.active = 0;
+            editandoPagina = -1;
+            rebuildTabs();
+        };
+        p->addWide (del, 28);
+
+        p->addTitle ("Fader layout");
+        p->addNote ("Quem fica em cada posicao no recall. Editar aqui VALE mesmo em snapshot "
+                    "com estado: a cena repoe os ajustes e esta lista diz quem ocupa cada "
+                    "fader. Use UPDATE se preferir arrumar a mesa e regravar.");
+        pg.slots.resize (size_t (mix.numChannels()));
+
+        for (size_t i = 0; i < pg.slots.size(); ++i)
+        {
+            auto* box = new juce::ComboBox();
+            box->addItem ("(vazio)", 1);
+            int sel = 1, id = 2;
+            for (const auto& src : settings.catalog.sources)
+            {
+                box->addItem (src.name, id);
+                if (src.name == pg.slots[i]) sel = id;
+                ++id;
+            }
+            box->setSelectedId (sel, juce::dontSendNotification);
+            auto* slot = &pg.slots[i];
+            box->onChange = [box, slot]
+            {
+                const auto t = box->getText();
+                *slot = (t == "(vazio)") ? std::string() : t.toStdString();
+            };
+            p->addRow ("Fader " + juce::String (int (i) + 1), box);
+        }
+        return p;
+    }
+
+    /** Data e hora de agora, no formato que a lista mostra. */
+    static std::string agoraTexto()
+    {
+        return juce::Time::getCurrentTime()
+                   .formatted ("%d/%m/%Y %H:%M").toStdString();
     }
 
     CfgPage* buildMonitor()
@@ -2181,6 +2790,97 @@ private:
                                          + "  (" + mesa::kBuildName + ")"));
         p->addRow ("Compilada em", makeReadOnly (std::string (mesa::kBuildDate)));
 
+        // ------------------------------------------------ superficie
+        p->addTitle ("Superficie");
+
+        // ------------------------------------------------ latencia NDI
+        p->addTitle ("Latencia da rede (NDI)");
+
+        auto* lat = new juce::ComboBox();
+        const int opcoes[] = { 10, 15, 20, 30, 40, 60 };
+        for (int ms : opcoes)
+            lat->addItem (juce::String (ms) + " ms por fila"
+                              + (ms == 40 ? "  (recomendado)" : ms <= 15 ? "  (arriscado)" : ""),
+                          ms);
+        lat->setSelectedId (settings.ndiLatenciaMs, juce::dontSendNotification);
+        lat->onChange = [this, lat] { settings.ndiLatenciaMs = lat->getSelectedId(); rebuildTabs(); };
+        p->addRow ("Espera por fila", lat);
+
+        {
+            // a conta inteira, para o operador ver de onde vem o atraso
+            auto* dev = deviceManager.getCurrentAudioDevice();   // JUCE: leituras nao sao const
+            const double sr = (dev != nullptr && dev->getCurrentSampleRate() > 0)
+                                  ? dev->getCurrentSampleRate() : 48000.0;
+            const int bl = dev != nullptr ? dev->getCurrentBufferSizeSamples() : 512;
+            const double blocoMs = 1000.0 * bl / sr;
+            const double total = 2.0 * settings.ndiLatenciaMs + blocoMs + 10.0 + 10.0;
+            p->addRow ("NDI entra e sai da mesa em",
+                       makeReadOnly ("uns " + std::to_string (int (total)) + " ms  ("
+                                     + std::to_string (settings.ndiLatenciaMs) + " entrada + "
+                                     + std::to_string (settings.ndiLatenciaMs) + " saida + "
+                                     + std::to_string (int (blocoMs)) + " placa + 10 envio + "
+                                     "10 recepcao)"));
+        }
+        p->addNote ("Cada fila NDI e uma espera - ela segura um pouco de audio para absorver "
+                    "o descompasso entre a rede e a placa. Menos espera e menos atraso, e "
+                    "tambem menos margem: abaixo do que a rede e o Windows aguentam, a fila "
+                    "seca e o audio pica - estalinhos com o medidor mexendo sao exatamente "
+                    "isso. 40 ms e o seguro. Para descer, va um degrau por vez e olhe no log "
+                    "se os BURACOS da fila NDI continuam em zero.");
+        p->addNote ("Eram 8 blocos da placa em cada fila, e bloco nao e tempo: com buffer 512 "
+                    "isso dava uns 70 ms so de espera nas duas filas. O maior ganho que "
+                    "sobra e o BUFFER DA PLACA - em 128 amostras a parte dela cai de 11 para "
+                    "3 ms, e a mesa inteira fica mais rapida, nao so o NDI.");
+        p->addNote ("Vale para as filas criadas a partir de agora: salve e reabra a mesa.");
+
+        auto* conv = new juce::ToggleButton();
+        conv->setToggleState (settings.ndiConvencao, juce::dontSendNotification);
+        conv->onClick = [this, conv]
+        {
+            settings.ndiConvencao = conv->getToggleState();
+            NdiEngine::instance().usaConvencaoNdi (settings.ndiConvencao);   // vale na hora
+            rebuildTabs();
+        };
+        p->addRow ("Nivel no padrao NDI", conv);
+        p->addNote ("O NDI define que o valor 1,0 e +4 dBu - o nivel de REFERENCIA - e deixa "
+                    "20 dB de folga acima dele. A mesa usa 1,0 como teto, que e o normal em "
+                    "audio digital. Ligado, a mesa converte nos dois sentidos e conversa no "
+                    "mesmo nivel que o vMix: saida NDI e saida Livewire do mesmo barramento "
+                    "chegam iguais la. Desligado, nao converte - util so se algum equipamento "
+                    "especifico nao seguir a convencao.");
+        p->addNote ("Para conferir: gerador de teste em 1 kHz, -18 dBFS, no PGM 1, saindo por "
+                    "NDI e por Livewire ao mesmo tempo. No vMix as duas entradas tem de marcar "
+                    "o mesmo. Muda na hora, sem reabrir.");
+
+        auto* qtd = new juce::ComboBox();
+        for (int n = mesa::kMinFadersPorLayer; n <= mesa::kMaxFadersPorLayer; n += 2)
+            qtd->addItem (juce::String (n) + " faders por layer  ("
+                              + juce::String (n * 2) + " canais)", n);
+        qtd->setSelectedId (settings.fadersPorLayer, juce::dontSendNotification);
+        qtd->onChange = [this, qtd]
+        {
+            settings.fadersPorLayer = mesa::limitaFadersPorLayer (qtd->getSelectedId());
+            rebuildTabs();
+        };
+        p->addRow ("Faders por layer", qtd);
+
+        p->addRow ("Em uso agora",
+                   makeReadOnly (std::to_string (mix.numChannels() / 2) + " por layer ("
+                                 + std::to_string (mix.numChannels()) + " canais)"));
+
+        if (settings.fadersPorLayer * 2 != mix.numChannels())
+            p->addNote ("VALE AO REABRIR A MESA. O mixer e montado com os canais de todas as "
+                        "layers de uma vez no arranque; mudar isso com a mesa aberta "
+                        "significaria parar o audio. Salve, feche e abra de novo.");
+
+        p->addNote ("A superficie se redimensiona sozinha: a largura de cada tira sai da tela "
+                    "dividida por este numero. Estudio pequeno fica melhor com 4 ou 6 faders "
+                    "largos, faceis de acertar; estudio grande, com 12 ou 16 na mesma tela. "
+                    "Em tira estreita a regua numerica do meio some - a do fader continua e "
+                    "diz a mesma coisa.");
+        p->addNote ("Cuidado ao DIMINUIR: fontes e snapshots que usam faders que deixaram de "
+                    "existir ficam guardados, mas nao aparecem ate a quantidade voltar.");
+
         p->addTitle ("Gravacoes de diagnostico");
         p->addNote ("O gravador fica no SOFT de cada canal, aba Validacao. Ele grava a "
                     "entrada crua, sem nenhum processamento nosso — e a forma de "
@@ -2388,13 +3088,31 @@ private:
         classe de defeito. */
     void timerCallback() override
     {
+        // ANUNCIO CHEGA DEPOIS.
+        //
+        // A varredura termina em segundos; o anuncio com a lista completa so
+        // vem de segundo em segundo, e a lista grande (ADVT 1) nem sempre no
+        // primeiro. Juntar uma vez so, no fim da varredura, pegava o ouvinte
+        // recem-aberto e sem nada - e a lista saia igual a de antes. Por isso
+        // o relogio continua correndo enquanto houver anuncio novo.
         const int agora = varredura.quantosAchados();
+        const int ouvidas = navegador != nullptr ? int (navegador->fontes().size()) : 0;
         const bool acabou = ! varredura.emAndamento();
+
+        // ANUNCIO NOVO NAO REFAZ A TELA.
+        //
+        // Chegam de segundo em segundo, e mandar reconstruir a pagina a cada um
+        // deixava a janela de configuracoes se remontando sem parar: a rolagem
+        // voltava sozinha e nao dava para preencher um campo em paz. Nem era
+        // preciso - a lista de fontes se monta na hora em que e aberta, com o
+        // que o ouvinte tiver ate aquele instante. So a VARREDURA, que muda o
+        // que esta escrito na tela, justifica refazer.
+        ultimoOuvido = ouvidas;
 
         if (agora != ultimoAchado || acabou)
         {
             ultimoAchado = agora;
-            livewireSources = varredura.todasAsFontes();
+            livewireSources = juntaComOsAnuncios (varredura.todasAsFontes());
 
             if (settings.livewirePlaca.empty())
             {
@@ -2408,6 +3126,12 @@ private:
             rebuildTabs();
         }
 
+        // So para quando a varredura acabou E o ouvinte passou um tempo sem
+        // trazer novidade. Quinze segundos cobrem com folga o intervalo entre
+        // anuncios de qualquer equipamento da rede.
+        // Sem varredura em curso, o relogio nao tem mais o que fazer: o
+        // ouvinte continua no ar por conta dele, e quem precisa do que ele
+        // achou pega na hora de abrir a lista.
         if (acabou) stopTimer();
     }
 
@@ -2483,8 +3207,9 @@ private:
     void save()
     {
         settings.routing.masterGainDb = mix.masterGainDb.load();
-        mesa::applyRouting (settings, mix);
-        mesa::applyOutputs (settings.outputs, mix);
+        // uma regra so, compartilhada com a mesa: a lista manda, e o que
+        // saiu dela para de sair
+        mesa::aplicaSaidasDaPlaca (settings, mix);
         applyTally();
         if (auto xml = deviceManager.createStateXml())
             settings.deviceState = xml->toString().toStdString();
@@ -2514,6 +3239,66 @@ private:
     juce::Label* ndiList = nullptr;
     mutable std::map<size_t, int> inputT, outputT;
     std::vector<LwrpClient::Source> livewireSources;
+    /** Junta o que a VARREDURA achou com o que os ANUNCIOS trazem.
+
+        As duas descobertas veem a rede por caminhos diferentes, e nenhuma
+        sozinha ve tudo:
+
+          - a varredura pergunta por LWRP na porta 93. So enxerga quem
+            RESPONDE ali. Equipamento que anuncia mas nao serve LWRP fica de
+            fora - e e o caso da cartucheira, e o da propria mesa.
+          - o anuncio chega por multicast e traz o que cada no publica. E dele
+            que a lista do QOR se enche, e por isso o painel da Axia mostrava
+            as NOTE e os LV-DECK que a mesa nao mostrava.
+
+        A varredura tem prioridade quando as duas conhecem o mesmo canal: ela
+        perguntou direto ao dono. O anuncio completa o resto. */
+    /** Poe o ouvinte de anuncios no ar, se ja nao estiver.
+
+        Chamado junto das duas varreduras: ninguem deveria precisar saber que
+        existem dois mecanismos de descoberta para ver a lista completa. O
+        botao manual continua existindo para quem quer so escutar. */
+    void ouveAnuncios()
+    {
+        if (navegador == nullptr) navegador = std::make_unique<LivewireBrowser>();
+        if (! navegador->ativo() && ! settings.livewirePlaca.empty())
+            navegador->start (juce::String (settings.livewirePlaca));
+    }
+
+    /** Ouvinte no ar assim que as configuracoes abrem.
+
+        Era um botao que o operador tinha de saber apertar para a lista ficar
+        completa - e ninguem tem obrigacao de saber que existem dois mecanismos
+        de descoberta. Escutar multicast nao custa nada; o botao continua ali
+        para parar, quando se quer olhar a rede sem nosso trafego. */
+    void ouveAssimQueAbre() { ouveAnuncios(); }
+
+    std::vector<LwrpClient::Source> juntaComOsAnuncios (std::vector<LwrpClient::Source> daVarredura)
+    {
+        if (navegador == nullptr) return daVarredura;
+
+        for (const auto& f : navegador->fontes())
+        {
+            if (f.canal <= 0) continue;
+
+            const bool jaTem = std::any_of (daVarredura.begin(), daVarredura.end(),
+                                            [&f] (const LwrpClient::Source& s)
+                                            { return s.livewireChannel == f.canal; });
+            if (jaTem) continue;
+
+            LwrpClient::Source s;
+            s.livewireChannel = f.canal;
+            s.name = f.nome.toStdString();
+            daVarredura.push_back (s);
+        }
+
+        std::sort (daVarredura.begin(), daVarredura.end(),
+                   [] (const LwrpClient::Source& a, const LwrpClient::Source& b)
+                   { return a.livewireChannel < b.livewireChannel; });
+        return daVarredura;
+    }
+
+    int ultimoOuvido = -1;
     std::unique_ptr<LivewireBrowser> navegador;
     LivewireScanner varredura;
     int ultimoAchado = 0;
@@ -2522,8 +3307,19 @@ public:
     /** Avisa a superficie que a placa mudou, para religar os receptores. */
     std::function<void (const juce::String&)> onLivewirePlaca;
 
+    /** O destino do gerador mudou. Quem ouve religa as saidas de rede.
+
+        O gerador promete efeito IMEDIATO - liga e o tom sai. Nas saidas da
+        placa mestra era assim, porque o motor le o par a cada bloco. Nas de
+        rede nao: cada saida so ficava sabendo que o gerador a tomou quando a
+        rede era religada, no arranque ou no SALVAR E APLICAR. A tela dizia
+        "LIGADO: a saida OUTPUT 9 esta levando o sinal de teste" e o vMix nao
+        recebia nada. */
+    std::function<void()> onDestinoDoTeste;
+
 private:
     int editandoInput = -1;
+    int editandoPagina = -1;
     /** Output aberto em detalhe; -1 mostra a lista. */
     int editandoOutput = -1;
     juce::String livewireStatus { "nao consultado" };

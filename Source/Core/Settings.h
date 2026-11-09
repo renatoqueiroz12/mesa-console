@@ -285,6 +285,45 @@ struct Settings
         Axia espera nao esta publicado, entao fica ajustavel. */
     int livewireCarga = 96;
 
+    /** GERADOR DE SINAL DE TESTE.
+
+        Nao e gravado de proposito: nasce desligado a cada abertura. Tom de
+        teste esquecido ligado sai no ar, e essa e a falha classica de gerador
+        em mesa - custa um segundo religar e evita a chamada da madrugada. O
+        destino e o tipo sao guardados, so o liga-desliga que nao. */
+    /** QUANTOS FADERS POR LAYER.
+
+        Estudio pequeno quer 4 ou 6 faders largos, faceis de acertar; estudio
+        grande quer 12 ou 16 na mesma tela. A superficie se redimensiona
+        sozinha - a largura de cada tira sai da tela dividida por este numero.
+
+        Lido so no ARRANQUE: o mixer e alocado com os canais de todas as layers
+        de uma vez, e realocar em operacao significaria parar o audio. Mudar
+        aqui vale na proxima abertura, como em qualquer mesa que tem a
+        quantidade de canais configuravel. */
+    int   fadersPorLayer = 8;
+
+    /** Espera de cada fila NDI, em ms. Menos e mais rapido e mais arriscado:
+        abaixo do que a rede e o Windows aguentam, a fila seca e o audio pica.
+
+        Era 20 de fabrica, e 20 nao bastou: com o relogio do Windows em 15,6 ms
+        uma dormida atrasada ja consumia quase toda a folga, e o canal NDI
+        virou estalinhos. 40 e o que a mesa usava antes, na pratica, e
+        funcionava. Com o relogio agora em 1 ms, valores menores passam a ser
+        viaveis - mas a escolha e do operador, olhando os buracos no log. */
+    int   ndiLatenciaMs = 40;
+
+    /** Nivel NDI pela convencao do SDK: 1,0 = +4 dBu, escala cheia 20 dB
+        acima. Ligado, a mesa conversa no mesmo nivel que vMix e as demais
+        ferramentas NDI; desligado, usa 1,0 como escala cheia. */
+    bool  ndiConvencao = true;
+
+    int   testeTipo  = 0;              // 0 = 1 kHz, 1 = rosa, 2 = branco
+    float testeNivelDb = -18.0f;
+    std::string testeDestino;          // nome da saida, como no direct out
+    /** Barramento que o gerador toma, ou -1. Exclusivo com testeDestino. */
+    int   testeBus = -1;
+
     /** Anunciar as fontes da mesa na rede. DESLIGADO de fabrica.
 
         Historico: o anuncio identifica o NO pelo par HWID/INIP, e o HWID saia
@@ -380,6 +419,9 @@ inline void applyRouting (const Settings& s, MixerEngine& mix)
     for (int b = 0; b < kNumBuses; ++b)
     {
         mix.busParams[b].outputPair.store (s.routing.busOutputPair[b]);
+        // quem manda na mascara e o catalogo de saidas; aqui ela zera para nao
+        // sobrar par de uma configuracao anterior
+        mix.busParams[b].outputPairMask.store (0);
         mix.busParams[b].gainDb.store (s.routing.busGainDb[b]);
     }
     mix.monitor.cuePair    .store (s.routing.cueOutputPair);
@@ -393,6 +435,64 @@ inline void applyRouting (const Settings& s, MixerEngine& mix)
     mix.monitor.cueToMonitor.store (s.routing.cueToMonitor);
     mix.monitor.cueToStudio .store (s.routing.cueToStudio);
     mix.monitor.cueDimDb    .store (s.routing.cueDimDb);
+}
+
+/** A LISTA DE OUTPUTS E A UNICA VERDADE sobre o que sai pela placa mestra.
+
+    Reescreve o roteamento inteiro a partir do catalogo e devolve. Comeca
+    zerando tudo de proposito: sem isso nao existe REMOVER um destino - tirar a
+    placa de uma saida deixava o roteamento antigo valendo, inclusive depois de
+    reabrir a mesa.
+
+    Cobre tambem monitor, fone, CUE e estudio. Antes so os quatro PGM eram
+    lidos, e apontar uma placa para o monitor nao fazia nada: o audio saia do
+    primeiro lugar e nao chegava no segundo.
+
+    Rede e placa secundaria nao passam por aqui - quem cuida delas e o
+    rebindOutputs. Direct out e mix-minus tambem ficam de fora: nao sao
+    barramentos, e a placa mestra sai por barramento. */
+inline void aplicaSaidasDaPlaca (Settings& s, MixerEngine& mix)
+{
+    // Uma saida por linha da lista, e um barramento pode aparecer em varias -
+    // PGM 1 no processador E no gravador, por exemplo. A mascara junta todas;
+    // o campo unico guarda a primeira, para quem so tem uma.
+    unsigned mascara[kNumBuses] = { 0 };
+
+    for (int b = 0; b < kNumBuses; ++b) s.routing.busOutputPair[b] = -1;
+    s.routing.cueOutputPair     = -1;
+    s.routing.monitorOutputPair = -1;
+    s.routing.phonesOutputPair  = -1;
+    s.routing.studioOutputPair  = -1;
+
+    for (const auto& o : s.outputs.outputs)
+    {
+        if (o.kind == int (InputKind::Network)) continue;
+        if (! o.deviceName.empty()) continue;
+        if (o.livewireChannel > 0 || ! o.streamName.empty()) continue;
+        if (o.pair < 0) continue;
+        if (! o.directSource.empty() || o.mixMinusChannel >= 0) continue;
+
+        switch (o.busSource)
+        {
+            case 0: case 1: case 2: case 3:
+                if (o.pair < 16) mascara[o.busSource] |= (1u << o.pair);
+                if (s.routing.busOutputPair[o.busSource] < 0)
+                    s.routing.busOutputPair[o.busSource] = o.pair;
+                s.routing.busGainDb[o.busSource] = o.ganhoDb;
+                break;
+            case 4: s.routing.cueOutputPair     = o.pair; break;
+            case 5: s.routing.monitorOutputPair = o.pair; break;
+            case 6: s.routing.phonesOutputPair  = o.pair; break;
+            case 7: s.routing.studioOutputPair  = o.pair; break;
+            default: break;
+        }
+    }
+    applyRouting (s, mix);
+
+    // a mascara vem depois: applyRouting escreve o par unico, e aqui
+    // acrescentamos os demais pares que o mesmo barramento alimenta
+    for (int b = 0; b < kNumBuses; ++b)
+        mix.busParams[size_t (b)].outputPairMask.store (mascara[b]);
 }
 
 inline std::string settingsToJson (const Settings& s)
@@ -545,6 +645,13 @@ inline std::string settingsToJson (const Settings& s)
     root.set ("gpioNode",        text (s.gpioNode));
     root.set ("livewirePlaca",   text (s.livewirePlaca));
     root.set ("livewireCarga",   num (s.livewireCarga));
+    root.set ("fadersPorLayer", num  (s.fadersPorLayer));
+    root.set ("ndiLatenciaMs",  num  (s.ndiLatenciaMs));
+    root.set ("ndiConvencao",   boolean (s.ndiConvencao));
+    root.set ("testeTipo",      num  (s.testeTipo));
+    root.set ("testeNivelDb",   num  (s.testeNivelDb));
+    root.set ("testeDestino",   text (s.testeDestino));
+    root.set ("testeBus",       num  (s.testeBus));
     root.set ("livewireAnuncio", boolean (s.livewireAnuncio));
     root.set ("livewireHwid",    num (s.livewireHwid));
     root.set ("livewireUdpc",    num (s.livewireUdpc));
@@ -563,6 +670,42 @@ inline std::string settingsToJson (const Settings& s)
     root.set ("pages", pg);
 
     return toString (root);
+}
+
+/** Faixa aceita de faders por layer. Abaixo de 4 nao vale a pena ter layer;
+    acima de 16 as tiras ficam estreitas demais para os botoes caberem mesmo
+    numa tela grande. */
+inline constexpr int kMinFadersPorLayer = 4;
+inline constexpr int kMaxFadersPorLayer = 16;
+
+inline int limitaFadersPorLayer (int n) noexcept
+{
+    return n < kMinFadersPorLayer ? kMinFadersPorLayer
+         : n > kMaxFadersPorLayer ? kMaxFadersPorLayer : n;
+}
+
+/** QUANTOS BLOCOS DE FILA para segurar um tempo de rede.
+
+    As filas eram dimensionadas em BLOCOS DA PLACA - 8 blocos, meia cheia - e
+    blocos nao sao tempo. Com buffer 512 a 48 kHz, meia fila de 8 blocos sao
+    43 ms; somada a fila de saida, a mesa acrescentava uns 70 ms ao NDI so em
+    espera, bem mais do que ele precisa: o framesync ja absorve a oscilacao da
+    rede antes de entregar, e o que sobra para a fila e so o descompasso entre
+    duas threads.
+
+    Aqui o pedido e em MILISSEGUNDOS, e a conta devolve quantos blocos a fila
+    precisa ter para que, meia cheia, ela segure esse tempo. Nunca menos de 3:
+    abaixo disso a correcao de relogio nao tem folga para trabalhar e a fila
+    seca no primeiro soluco do Windows. */
+inline int blocosParaLatencia (double ms, double sampleRate, int bloco) noexcept
+{
+    if (bloco <= 0 || sampleRate <= 0.0) return 8;
+    const double alvo       = ms * sampleRate / 1000.0;   // amostras na fila
+    const double capacidade = alvo * 2.0;                 // meia cheia
+    const int blocos = int (std::ceil (capacidade / double (bloco)));
+    // Minimo de 4: com 3, meia fila e um bloco e meio, e uma acordada
+    // atrasada da thread de rede ja a esvazia.
+    return blocos < 4 ? 4 : (blocos > 64 ? 64 : blocos);
 }
 
 inline bool settingsFromJson (const std::string& src, Settings& out)
@@ -724,6 +867,13 @@ inline bool settingsFromJson (const std::string& src, Settings& out)
     out.gpioNode          = root.string ("gpioNode");
     out.livewirePlaca     = root.string ("livewirePlaca");
     out.livewireCarga     = int (root.number ("livewireCarga", 96));
+    out.fadersPorLayer    = limitaFadersPorLayer (int (root.number ("fadersPorLayer", 8)));
+    out.ndiLatenciaMs     = int (root.number ("ndiLatenciaMs", 40));
+    out.ndiConvencao      = root.boolean ("ndiConvencao", true);
+    out.testeTipo         = int (root.number ("testeTipo", 0));
+    out.testeNivelDb      = float (root.number ("testeNivelDb", -18.0));
+    out.testeDestino      = root.string ("testeDestino");
+    out.testeBus          = int (root.number ("testeBus", -1));
     out.livewireAnuncio   = root.boolean ("livewireAnuncio", false);
     out.livewireHwid      = int (root.number ("livewireHwid", 0));
     out.livewireUdpc      = int (root.number ("livewireUdpc", 4002));

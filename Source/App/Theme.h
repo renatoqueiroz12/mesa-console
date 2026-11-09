@@ -136,11 +136,51 @@ namespace theme
         return juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f);
     }
 
-    // Curso do fader: topo +20 dB. Os 10 dB extras acima da unidade dao margem
-    // de mixagem para fonte fraca sem precisar mexer no trim no meio do ar.
-    inline constexpr float kFaderTopDb    =  20.0f;
-    inline constexpr float kFaderBottomDb = -60.0f;
-    inline constexpr float kFaderSpan     = kFaderTopDb - kFaderBottomDb;   // 80 dB
+
+    // ------------------------------------------------------- escala do medidor
+    //
+    // Os medidores nao falam em dBFS: falam na escala de OPERACAO, com 0 no
+    // nivel nominal. E o que o operador de radio le a vida inteira — e o que
+    // torna "verde ate 0, amarelo ate +10, vermelho acima" uma regra util em
+    // vez de decoracao.
+    //
+    // REFERENCIA: 0 dB de operacao = -18 dBFS. E a EBU R68, que e a usada
+    // aqui. Estava em -20, que e a americana (SMPTE RP155) - duas referencias
+    // diferentes nao sao questao de gosto: elas deslocam TUDO em 2 dB, e o
+    // equipamento do outro lado da linha usa uma delas.
+    //
+    // O topo acompanha a referencia: +18 de operacao cai exatamente em 0 dBFS,
+    // o teto digital. Assim estourar a escala significa estourar de verdade,
+    // e nao sobra um pedaco de escala que o sinal nunca alcanca.
+    // AXIA/TELOS usa a convencao americana, com 0 = -20 dBFS. Numa casa que
+    // interliga com QOR, conferir isso e obrigatorio: dois lados em convencoes
+    // diferentes fazem tudo que sai daqui chegar la 2 dB acima do que o
+    // medidor do outro indica - e ninguem percebe olhando so um dos dois.
+    inline constexpr float kMeterRefDb  = -18.0f;   // 0 da escala, em dBFS
+    inline constexpr float kMeterTopVu  =  18.0f;   // +18 = 0 dBFS
+    inline constexpr float kMeterBotVu  = -42.0f;   // -42 = -60 dBFS
+
+    inline float dbfsToVu (float dbfs) noexcept { return dbfs - kMeterRefDb; }
+
+    // CURSO DO FADER = FAIXA DOS MEDIDORES.
+    //
+    // Eram diferentes: o fader ia de -60 a +20 (80 dB) e o medidor de -42 a
+    // +18 na escala de operacao (60 dB). Mesma altura de coluna, faixas
+    // diferentes - entao o 0 do fader e o 0 da barra ao lado ficavam em alturas
+    // que nao tinham nada a ver, e nao dava para ler as duas juntas.
+    //
+    // Igualando, cada numero do fader fica na MESMA altura do mesmo numero na
+    // barra. Perdem-se 2 dB no topo e a faixa de -42 a -60, que na pratica ja e
+    // fader fechado - e existe o -infinito logo abaixo para isso.
+    /** Margem em cima e embaixo do curso do fader, para o cap caber inteiro
+        nas pontas. O MEDIDOR usa a mesma, senao o mesmo dB cai em alturas
+        diferentes nos dois e a regua da esquerda nao bate com a barra da
+        direita. */
+    inline constexpr float kFaderMargem = 34.0f;
+
+    inline constexpr float kFaderTopDb    =  kMeterTopVu;    // +18
+    inline constexpr float kFaderBottomDb =  kMeterBotVu;    // -42
+    inline constexpr float kFaderSpan     = kFaderTopDb - kFaderBottomDb;
 
     inline float faderPosToDb (float pos) noexcept
     {
@@ -152,20 +192,6 @@ namespace theme
                                     : juce::jlimit (0.0f, 1.0f, (db - kFaderBottomDb) / kFaderSpan);
     }
 
-    // ------------------------------------------------------- escala do medidor
-    //
-    // Os medidores nao falam em dBFS: falam na escala de OPERACAO, com 0 no
-    // nivel nominal. E o que o operador de radio le a vida inteira — e o que
-    // torna "verde ate 0, amarelo ate +10, vermelho acima" uma regra util em
-    // vez de decoracao.
-    //
-    // Referencia: 0 na escala = -20 dBFS. Assim +20 cai exatamente no teto
-    // digital, e estourar a escala significa estourar de verdade.
-    inline constexpr float kMeterRefDb  = -20.0f;   // 0 da escala, em dBFS
-    inline constexpr float kMeterTopVu  =  20.0f;   // topo da escala
-    inline constexpr float kMeterBotVu  = -40.0f;   // fundo da escala
-
-    inline float dbfsToVu (float dbfs) noexcept { return dbfs - kMeterRefDb; }
 
     /** Posicao 0..1 do medidor a partir do nivel em dBFS. */
     inline float meterNorm (float dbfs) noexcept
