@@ -3,6 +3,14 @@ project(MesaConsole VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Runtime do MSVC embutido no executavel.
+# Sem isto o .exe exige o Visual C++ Redistributable instalado na maquina;
+# se nao tiver, a mesa nem abre - da erro de DLL faltando. Numa maquina de
+# ar isso e descoberta no pior momento possivel.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 # ---------------------------------------------------------------- testes do core
 # O core nao depende de JUCE: compila e roda em qualquer plataforma.
 add_executable(test_core tests/test_core.cpp)
@@ -25,7 +33,14 @@ if(BUILD_APP)
 
     target_sources(MesaConsole PRIVATE Source/App/Main.cpp)
 
+    # NOMINMAX aqui, e nao dentro de um header: o windows.h define max e min
+    # como MACRO, e a partir dai qualquer std::max() vira erro de sintaxe.
+    # NdiEngine.h ja definia, mas so dentro de #if MESA_HAS_NDI - entao sem o
+    # SDK do NDI a protecao sumia e LivewireReceiver.h puxava o winsock2.h
+    # desprotegido. Definindo no alvo, vale para todos os headers sempre.
     target_compile_definitions(MesaConsole PRIVATE
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:MesaConsole,JUCE_PRODUCT_NAME>"
